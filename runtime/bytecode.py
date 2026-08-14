@@ -23,6 +23,7 @@ SET_OUT = "SET_OUT"
 WAIT_TIME = "WAIT_TIME"
 JUMP = "JUMP"
 JUMP_IF_ZERO = "JUMP_IF_ZERO"
+JUMP_IF_VAR_NEQ_CONST = "JUMP_IF_VAR_NEQ_CONST"  # agregado al implementar codegen de IF — ver docs/INSTRUCTION_SET.md
 CALL = "CALL"
 RET = "RET"
 SET_VAR = "SET_VAR"

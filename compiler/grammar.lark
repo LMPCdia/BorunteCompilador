@@ -32,7 +32,8 @@ TYPE.2: "INT" | "REAL" | "BOOL"
 
 timer_decl: "TIMER" NAME "=" number "s" NEWLINE
 
-proc_decl: "PROC" NAME "(" [NAME ("," NAME)*] ")" NEWLINE statement* "ENDPROC" NEWLINE
+proc_decl: "PROC" NAME "(" [NAME ("," NAME)*] ")" NEWLINE proc_body "ENDPROC" NEWLINE
+proc_body: statement*
 
 // --- Sentencias ----------------------------------------------------------
 
@@ -48,7 +49,9 @@ wait_time_stmt: "WAIT" number "s" NEWLINE
 set_out_stmt: "SET_OUT" "(" NAME "," STATE ")" NEWLINE
 STATE.2: "ON" | "OFF"
 
-if_stmt: "IF" expr "THEN" NEWLINE statement* ("ELSE" NEWLINE statement*)? "ENDIF" NEWLINE
+if_stmt: "IF" expr "THEN" NEWLINE then_block ("ELSE" NEWLINE else_block)? "ENDIF" NEWLINE
+then_block: statement*
+else_block: statement*
 
 call_stmt: NAME "(" [expr ("," expr)*] ")" NEWLINE
 

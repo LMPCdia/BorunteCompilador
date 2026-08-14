@@ -9,35 +9,40 @@ avanzando).
 
 - [x] Arquitectura de 2 niveles definida y documentada
 - [x] Mapa de registros Modbus del Borunte consolidado
-- [x] Contrato de bytecode v0.1 (DRAFT, sin validar contra hardware)
+- [x] Contrato de bytecode v0.2 (DRAFT, sin validar contra hardware — se le
+      agregó `JUMP_IF_VAR_NEQ_CONST` respecto de la v0.1 original)
 - [x] Cliente Modbus del robot (`comms/robot_client.py`)
 - [x] **Simulador del robot** (`comms/robot_simulator.py`) — permite probar
       todo sin hardware; supuestos documentados en `docs/SIMULATION.md`
 - [x] Gramática v0.1 del DSL (`compiler/grammar.lark`)
-- [x] Codegen para el subconjunto lineal: `POINT`, `VAR` (init constante),
-      `MOVEJ`/`MOVEL`, `WAIT_IN`, `SET_OUT`, `WAIT`
+- [x] **AST propio de dos pasadas** (`compiler/ast_nodes.py` +
+      `compiler/ast_builder.py`) — reemplaza el Transformer de una sola
+      pasada que no podía resolver saltos hacia adelante
+- [x] **Codegen v0.2 completo**: `POINT`, `VAR`, `MOVEJ`/`MOVEL`,
+      `WAIT_IN`, `SET_OUT`, `WAIT`, **`IF`/`ELSE`**, **`PROC`/llamadas**
+      (incluye llamadas hacia adelante — el PROC puede definirse después
+      del CALL en el texto)
 - [x] VM de referencia en Python (`runtime/vm.py`)
-- [x] **Test de punta a punta**: DSL → parser → bytecode → VM → robot
-      simulado, pasando (`tests/test_end_to_end.py`)
-- [ ] Codegen para `IF`/`ELSE` — **incompleto a propósito, ver abajo**
-- [ ] Codegen para `PROC`/llamadas a subrutina — **incompleto a propósito**
+- [x] Tests de punta a punta: lineal (`test_end_to_end.py`) + control de
+      flujo `IF`/`PROC` (`test_control_flow.py`) — **15/15 en verde**
+- [x] **GUI v0.1 (PySide6)**: editor + botón Compilar (muestra bytecode y
+      tabla de puntos, o el error de compilación) + panel de conexión
+      (simulador o robot real por IP) + botón Ejecutar (corre en un hilo
+      aparte, log en vivo) — probada headless en `tests/test_gui_smoke.py`
 - [ ] VM en ladder/IL para el CX3G real (bloqueada hasta tener hardware)
-- [ ] GUI (PySide6) — no arrancada todavía
+- [ ] GUI: resaltado de sintaxis, captura de puntos en vivo desde el robot
+      (falta la función de "digitalizar", ver `docs/ARCHITECTURE.md`)
 
-## Limitación conocida: `IF` y `PROC` no compilan
+## Limitaciones conocidas del codegen v0.2 (documentadas a propósito, no bugs escondidos)
 
-El `Transformer` de Lark que usamos en `compiler/codegen.py` procesa el
-árbol de abajo hacia arriba (bottom-up). Eso funciona perfecto para
-sentencias lineales, pero se rompe para `IF/ELSE` y `PROC` porque necesitan
-saber la dirección (PC) de instrucciones que todavía no se emitieron. Ambos
-casos están marcados con `raise CompileError(...)` y una explicación en el
-código — a propósito, para no generar bytecode incorrecto en silencio.
-
-**La solución** es pasar a un compilador de dos pasadas: primero armar un
-AST real (con una clase propia, no el árbol crudo de Lark), y recién ahí
-generar bytecode con resolución de saltos por backpatching. Es un cambio
-acotado a `compiler/codegen.py` — no afecta a `runtime/`, `comms/` ni al
-diseño del bytecode en sí.
+- `IF` solo soporta condiciones de la forma `VAR == CONST` — no
+  `VAR == VAR` ni expresiones compuestas. Intentarlo tira `CompileError`
+  clara, no bytecode incorrecto.
+- `PROC` no tiene calling convention: los parámetros se parsean pero no se
+  bindean a nada. Usá `VAR` globales si necesitás pasar datos a un `PROC`
+  por ahora.
+- Los offsets de puntos (`p + OFFSET(...)`) se resuelven en tiempo de
+  compilación, no en runtime.
 
 ## Setup
 
@@ -51,6 +56,16 @@ pytest tests/ -v -s
 El `-s` muestra el bytecode generado y el trace de ejecución de
 `test_end_to_end_against_simulator` — es la forma más rápida de ver todo el
 pipeline funcionando.
+
+Para abrir la GUI:
+
+```bash
+python -m gui.app
+```
+
+Se abre con un programa de ejemplo ya cargado. Flujo: "Conectar" (dejá
+"Simulador" tildado si no tenés hardware) → "Compilar" → "Ejecutar". El tab
+"Log de ejecución" muestra el trace en vivo.
 
 ## Estructura
 
@@ -69,20 +84,22 @@ docs/        ARCHITECTURE.md, MODBUS_REGISTER_MAP.md, INSTRUCTION_SET.md,
 
 ## Próximos pasos sugeridos, en orden
 
-1. Arreglar el compiler de dos pasadas para que `IF`/`PROC` compilen.
-2. Arrancar `gui/` — puede desarrollarse contra el simulador sin esperar
-   nada más.
+1. Resaltado de sintaxis en el editor de la GUI (`gui/main_window.py`,
+   `QSyntaxHighlighter` sobre el `QPlainTextEdit`).
+2. Función de "digitalizar punto": botón en la GUI que, con el robot
+   conectado, lea la posición actual (`robot.read_world_position()`) y la
+   agregue a una tabla editable de puntos con nombre — hoy la tabla de
+   puntos es de solo lectura, poblada desde el bytecode compilado.
 3. Cuando llegue el hardware: seguir la guía de `docs/SIMULATION.md` →
    "Próximo hito cuando llegue el hardware".
 
 ## Trabajo en paralelo (Claude Code)
 
-Con el estado actual, ya se puede repartir:
-
-- Sesión A → arreglar `compiler/codegen.py` (dos pasadas, IF/PROC)
-- Sesión B → arrancar `gui/` contra `comms/robot_simulator.py`
-- Sesión C → ampliar `comms/` con el cliente Modbus del PLC (CX3G), en
-  espejo de `robot_client.py`
+- Sesión A → resaltado de sintaxis + digitalización de puntos en `gui/`
+- Sesión B → soporte de `VAR == VAR` en `IF` y calling convention real para
+  `PROC` en `compiler/codegen.py`
+- Sesión C → cliente Modbus del PLC (CX3G), en espejo de
+  `comms/robot_client.py`
 
 `plc_vm/` sigue sin ser delegable a un agente: necesita a alguien con
 GX Developer/Works2 y, eventualmente, el hardware real.

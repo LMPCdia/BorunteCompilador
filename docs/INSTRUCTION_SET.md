@@ -41,7 +41,8 @@ Base propuesta: `D4000` en adelante (soporta ~250 puntos antes de tocar
 | `0x04` | `SET_OUT` | A=número de salida, B=estado (0/1) | Fuerza salida |
 | `0x05` | `WAIT_TIME` | B=milisegundos | Timer bloqueante |
 | `0x06` | `JUMP` | B=PC destino | Salto incondicional |
-| `0x07` | `JUMP_IF_ZERO` | A=índice de variable, B=PC destino | Salto condicional |
+| `0x07` | `JUMP_IF_ZERO` | A=índice de variable, B=PC destino | Salto condicional (variable == 0). Reservado para futuro uso; el codegen v0.1 usa `0x0D` en su lugar (ver nota abajo) |
+| `0x0D` | `JUMP_IF_VAR_NEQ_CONST` | A=índice de variable, B=constante, C=PC destino | Salta a C si `var != const`. **Agregado en la iteración del codegen (no estaba en el diseño original v0.1)** — es lo que permite compilar `IF var == const THEN ... ELSE ... ENDIF`. Limitación actual: el codegen SOLO soporta esta forma exacta de condición (`VAR == CONST`), no `VAR == VAR` ni expresiones compuestas. |
 | `0x08` | `CALL` | B=PC destino | Llama subrutina (usa pila de retorno del PLC) |
 | `0x09` | `RET` | — | Vuelve de subrutina |
 | `0x0A` | `SET_VAR` | A=índice var, B=valor inmediato | Asigna constante |

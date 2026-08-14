@@ -20,6 +20,7 @@ from runtime.bytecode import (
     CALL,
     END,
     JUMP,
+    JUMP_IF_VAR_NEQ_CONST,
     JUMP_IF_ZERO,
     MOVEJ,
     MOVEL,
@@ -98,6 +99,9 @@ class ReferenceVM:
             elif instr.opcode == JUMP_IF_ZERO:
                 value = self.variables.get(instr.a, 0)
                 pc = instr.b if value == 0 else pc + 1
+            elif instr.opcode == JUMP_IF_VAR_NEQ_CONST:
+                value = self.variables.get(instr.a, 0)
+                pc = instr.c if value != instr.b else pc + 1
             elif instr.opcode == CALL:
                 self.call_stack.append(pc + 1)
                 pc = instr.b
