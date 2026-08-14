@@ -1,0 +1,75 @@
+// Gramática v0.1 del DSL tipo KRL para Borunte.
+// Cubre el subconjunto acordado en docs/INSTRUCTION_SET.md.
+// A ampliar SOLO después del PoC de la VM (ver roadmap).
+
+start: statement*
+
+statement: point_decl
+         | var_decl
+         | timer_decl
+         | proc_decl
+         | assignment
+         | move_stmt
+         | wait_in_stmt
+         | wait_time_stmt
+         | set_out_stmt
+         | if_stmt
+         | call_stmt
+
+// --- Declaraciones -----------------------------------------------------
+
+point_decl: "POINT" NAME "=" point_expr NEWLINE
+
+point_expr: world_literal
+          | NAME                        -> point_ref
+          | point_expr "+" offset_expr  -> point_offset
+
+world_literal: "WORLD" "(" number ("," number)~5 ")"
+offset_expr: "OFFSET" "(" signed_number ("," signed_number)~5 ")"
+
+var_decl: "VAR" NAME ":" TYPE ("=" expr)? NEWLINE
+TYPE.2: "INT" | "REAL" | "BOOL"
+
+timer_decl: "TIMER" NAME "=" number "s" NEWLINE
+
+proc_decl: "PROC" NAME "(" [NAME ("," NAME)*] ")" NEWLINE statement* "ENDPROC" NEWLINE
+
+// --- Sentencias ----------------------------------------------------------
+
+assignment: NAME "=" expr NEWLINE
+
+move_stmt: MOVE_KIND point_expr "SPEED" number NEWLINE
+MOVE_KIND.2: "MOVEJ" | "MOVEL"
+
+wait_in_stmt: "WAIT_IN" "(" NAME ("," number)? ")" NEWLINE
+wait_time_stmt: "WAIT" number "s" NEWLINE
+              | "WAIT" "UNTIL" "MOVE_DONE" NEWLINE
+
+set_out_stmt: "SET_OUT" "(" NAME "," STATE ")" NEWLINE
+STATE.2: "ON" | "OFF"
+
+if_stmt: "IF" expr "THEN" NEWLINE statement* ("ELSE" NEWLINE statement*)? "ENDIF" NEWLINE
+
+call_stmt: NAME "(" [expr ("," expr)*] ")" NEWLINE
+
+// --- Expresiones -----------------------------------------------------------
+
+?expr: expr "==" expr   -> eq
+     | expr "!=" expr   -> neq
+     | expr "+" expr    -> add
+     | expr "-" expr    -> sub
+     | atom
+
+?atom: NAME
+     | signed_number
+     | "(" expr ")"
+
+number: SIGNED_NUMBER
+signed_number: SIGNED_NUMBER
+
+%import common.CNAME -> NAME
+%import common.SIGNED_NUMBER
+%import common.NEWLINE
+%import common.WS_INLINE
+%ignore WS_INLINE
+%ignore /;[^\n]*/    // comentarios con ;

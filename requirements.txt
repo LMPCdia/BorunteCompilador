@@ -1,0 +1,4 @@
+pymodbus>=3.6
+lark>=1.1
+PySide6>=6.6
+pytest>=8.0
