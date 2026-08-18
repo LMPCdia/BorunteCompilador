@@ -28,15 +28,21 @@ avanzando).
 - [x] **Cliente Modbus del PLC CX3G** (`comms/plc_client.py`): carga el
       bytecode, arranca/para la VM del ladder y lee su estado en vivo.
       ⚠️ Todo el nivel PLC es propuesta **sin confirmar** — ver abajo.
+- [x] **PLC CX3G simulado** (`comms/plc_simulator.py`): ejecuta el bytecode
+      cargado, avanza el PC y mantiene el banco de variables. Es la
+      **especificación ejecutable** de lo que hay que escribir en ladder, y lo
+      que permite ejercitar el sistema de 2 niveles completo sin hardware.
+- [x] **Panel de la VM del PLC** (`gui/plc_panel.py`, Tarea E): conectar,
+      cargar con verificación, arrancar/parar/pausar/resetear, y ver PC +
+      estado + banco de variables en vivo, con el poll en un hilo aparte.
 - [x] **GUI v0.2 (PySide6)** con paneles acoplables al estilo WorkVisual:
       editor con resaltado de sintaxis, estructura del proyecto navegable,
       propiedades, ventana de mensajes, campos de trabajo, digitalización de
       puntos, y ejecutar/parar en un hilo aparte con log en vivo
 - [x] **Empaquetado**: `dist/BorunteDSL.exe` de un solo archivo, con
       `--self-test` como criterio de aceptación
-- [x] **154 tests en verde**
-- [ ] Panel de la GUI para la VM del PLC — `comms/plc_client.py` existe pero
-      todavía nadie lo usa desde la interfaz (ver "Próximos pasos")
+- [x] **231 tests en verde**, incluidos 18 que verifican que la VM de
+      referencia y la VM del PLC **coincidan** ejecutando el mismo programa
 - [ ] VM en ladder/IL para el CX3G real (bloqueada hasta tener hardware)
 
 ## Lo que NO está confirmado contra hardware
@@ -144,12 +150,14 @@ el primer programa — y con `console=False` ese error no se ve en ninguna parte
 ```
 compiler/    parser (Lark) + AST de dos pasadas + codegen → bytecode
 comms/       robot_client.py (robot), plc_client.py (PLC CX3G),
-             robot_simulator.py + fake_modbus.py (para probar sin hardware)
+             robot_simulator.py + plc_simulator.py + fake_modbus.py (para
+             probar los dos niveles sin hardware)
 runtime/     bytecode.py (Instruction/Program/opcodes), vm.py (VM de
              referencia), plc_io_simulator.py (E/S simulada del PLC)
 gui/         main_window.py + paneles (project_tree, properties_panel,
-             message_window, work_fields, connection_panel,
-             syntax_highlighter), vm_worker.py, app.py (--self-test)
+             message_window, work_fields, connection_panel, plc_panel,
+             syntax_highlighter), vm_worker.py + plc_status_worker.py,
+             app.py (--self-test)
 packaging/   spec de PyInstaller, build_exe.ps1, datafiles.py
 plc_vm/      SOLO documentación — la VM real se escribe a mano en
              GX Developer/Works2 una vez validado el contrato con hardware
@@ -158,21 +166,30 @@ docs/        ARCHITECTURE.md, MODBUS_REGISTER_MAP.md, INSTRUCTION_SET.md,
              SIMULATION.md
 ```
 
+## Dos formas de ejecutar un programa (no confundirlas)
+
+| | Corre en | Cómo |
+|---|---|---|
+| **Ejecutar** (F5, barra de herramientas) | La **PC** (`runtime/vm.py`) | Habla Modbus con el robot desde Python |
+| **Panel "VM del PLC"** | El **PLC** | Carga el bytecode en los registros `D` y le pide al PLC que lo ejecute |
+
+El segundo es el modo en que el sistema va a funcionar de verdad. El primero
+sirve para probar y depurar sin depender del ladder. Que los dos den el mismo
+resultado es justamente lo que valida el contrato — y hay 18 tests que lo
+verifican programa por programa.
+
 ## Próximos pasos sugeridos, en orden
 
-1. **Panel de la GUI para la VM del PLC.** `comms/plc_client.py` sabe cargar
-   el programa, arrancarlo, pararlo y leer el Program Counter en vivo, pero
-   nadie lo usa: hoy el "Ejecutar" de la barra corre la VM de referencia en la
-   PC, no en el CX3G. Falta el panel que cargue el programa compilado y muestre
-   PC + estado + banco de variables en vivo. El poll del estado va en un hilo
-   aparte, como `gui/vm_worker.py`, no en el hilo de la UI.
-2. **Deduplicar la tabla de puntos en el codegen.** Cambia los índices del
+1. **Deduplicar la tabla de puntos en el codegen.** Cambia los índices del
    bytecode, así que hay que hacerlo con los tests delante.
-3. **Persistencia de los puntos digitalizados** (decisión de diseño 3 de
+2. **Persistencia de los puntos digitalizados** (decisión de diseño 3 de
    `docs/ARCHITECTURE.md`: SQLite/JSON en la PC). Hoy viven solo en memoria de
    la GUI y se pierden al cerrarla.
-4. Recordar la disposición de los paneles entre sesiones
+3. Recordar la disposición de los paneles entre sesiones
    (`QMainWindow.saveState`).
+4. **Escribir la VM en ladder** para el CX3G, usando `comms/plc_simulator.py`
+   como especificación: cada rama de su `_step()` tiene que tener un
+   equivalente en una red de ladder.
 5. Cuando llegue el hardware: seguir `docs/SIMULATION.md` → "Próximo hito
    cuando llegue el hardware", y validar primero la hipótesis 2 del PLC (orden
    de los words de 32 bits).

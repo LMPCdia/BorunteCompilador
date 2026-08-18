@@ -43,7 +43,7 @@ en `docs/SIMULATION.md`.
 
 ## Estado actual (ver también README.md, que puede estar más actualizado)
 
-**154 tests en verde.** Los de GUI necesitan `QT_QPA_PLATFORM=offscreen` si no
+**231 tests en verde.** Los de GUI necesitan `QT_QPA_PLATFORM=offscreen` si no
 hay display.
 
 - **Contrato v0.2** (`docs/INSTRUCTION_SET.md`): opcodes hasta `0x0F`, formato
@@ -65,6 +65,13 @@ hay display.
   proyecto (navega al código), propiedades (muestra el registro `D` destino),
   ventana de mensajes, campos de trabajo, resaltado de sintaxis con dos
   paletas, digitalización de puntos, y ejecutar/parar en un hilo aparte.
+- **`comms/plc_simulator.py`**: CX3G simulado que EJECUTA el bytecode. No es
+  el ladder (`plc_vm/` sigue sin código, regla 2) — es la especificación
+  ejecutable de lo que ese ladder tiene que hacer. Cada rama de su `_step()`
+  debería tener un equivalente en una red de ladder.
+- **Panel de la VM del PLC** (`gui/plc_panel.py` + `gui/plc_status_worker.py`,
+  Tarea E): carga el programa en el PLC y lo ejecuta ahí, con el poll del
+  estado en un hilo aparte.
 - **`packaging/`**: `.exe` de un solo archivo, con `--self-test` como criterio
   de aceptación.
 
@@ -89,17 +96,16 @@ hay display.
 6. **El resaltado necesita dos paletas.** Una sola pensada para fondo blanco
    queda ilegible sobre el tema oscuro de Windows. Hay un test de contraste
    WCAG 3.0:1.
+7. **No dar de baja un hilo de poll en cada operación: pausarlo.** Bajarlo deja
+   señales encoladas que se entregan cuando el worker ya fue recolectado, y Qt
+   toca un objeto C++ destruido. Ver `gui/plc_status_worker.py` y el
+   `is_idle()` que el panel espera antes de tocar el socket.
+8. **El exit code que reporta el shell de Bash acá no es confiable** (devuelve
+   127 con la salida completa y exit real 0). Si hace falta el código de salida
+   de verdad, medirlo con PowerShell + `Start-Process -Wait -PassThru`. Un
+   crash real se reconoce distinto: corta la salida a la mitad, sin resumen.
 
 ## Tareas priorizadas
-
-### Tarea E — Panel de la GUI para la VM del PLC (siguiente)
-
-`comms/plc_client.py` sabe cargar el programa, arrancarlo, pararlo y leer el
-Program Counter en vivo, pero **nadie lo usa**: hoy el "Ejecutar" de la barra
-corre la VM de referencia en la PC, no en el CX3G. Falta el panel que cargue el
-programa compilado y muestre PC + estado + banco de variables en vivo. El poll
-del estado va en un hilo aparte, como `gui/vm_worker.py`, no en el hilo de la
-UI.
 
 ### Tarea F — Deduplicar la tabla de puntos en el codegen
 
@@ -126,7 +132,7 @@ viven solo en memoria de la GUI y se pierden al cerrarla.
 ### Completadas
 
 Tarea A (codegen de dos pasadas), Tarea B (GUI v0.1), Tarea C (cliente del
-PLC), Tarea D (afinar la GUI).
+PLC), Tarea D (afinar la GUI), Tarea E (panel de la VM del PLC).
 
 ## Cómo correr todo
 
