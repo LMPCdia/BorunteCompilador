@@ -43,61 +43,98 @@ en `docs/SIMULATION.md`.
 
 ## Estado actual (ver también README.md, que puede estar más actualizado)
 
-- Gramática v0.1 (`compiler/grammar.lark`) parsea el subconjunto completo
-  del lenguaje, incluyendo `IF`/`PROC`.
-- **Codegen v0.2 (`compiler/codegen.py`) YA soporta `IF`/`ELSE` y
-  `PROC`/`CALL`** (incluye llamadas hacia adelante). Ver limitaciones
-  documentadas en el docstring de ese archivo (condiciones solo
-  `VAR == CONST`, sin calling convention para parámetros de PROC).
-- `compiler/ast_nodes.py` + `compiler/ast_builder.py`: AST propio de dos
-  pasadas (reemplazó al Transformer de una sola pasada que no podía
-  resolver saltos hacia adelante).
-- `runtime/vm.py` (VM de referencia en Python) soporta todos los opcodes de
-  `docs/INSTRUCTION_SET.md`.
-- 15/15 tests en verde (`tests/test_end_to_end.py` + `tests/test_control_flow.py`
-  + `tests/test_gui_smoke.py`).
-- **GUI v0.1 ya existe** (`gui/main_window.py`, `gui/connection_panel.py`,
-  `gui/vm_worker.py`, `gui/app.py`): editor, compilar, panel de conexión
-  (simulador/real), ejecutar en background thread con log en vivo. Probada
-  headless (offscreen) en `tests/test_gui_smoke.py`. Falta: resaltado de
-  sintaxis, captura de puntos en vivo desde el robot ("digitalizar").
+**154 tests en verde.** Los de GUI necesitan `QT_QPA_PLATFORM=offscreen` si no
+hay display.
+
+- **Contrato v0.2** (`docs/INSTRUCTION_SET.md`): opcodes hasta `0x0F`, formato
+  de 8 words con los 32 bits en **word bajo primero** del lado del PLC,
+  calling convention de `PROC`, y el bloque de registros de control de la VM
+  (`D0-D7`, handshake por `D3`, bases `D1000`/`D4000`).
+- **Compilador v0.3** (`compiler/`): `IF` con `VAR == CONST` y `VAR == VAR`,
+  `PROC` con parámetros por slots fijos, asignación entre variables,
+  comentarios y líneas en blanco en cualquier parte, archivo sin salto de línea
+  final. Pasada 0 (`_collect_proc_signatures`) para que las llamadas hacia
+  adelante también carguen sus parámetros.
+- **`runtime/vm.py`**: soporta todos los opcodes del contrato y tiene
+  `request_stop()` para cortar en el próximo límite de instrucción.
+- **`comms/plc_client.py`**: `CoolmayPlcClient`, espejo de
+  `BorunteRobotClient` pero para el PLC. Carga bytecode + puntos, handshake de
+  comandos, banco de variables, relectura para verificar, troceado de
+  transacciones.
+- **GUI v0.2** (`gui/`): `QMainWindow` con paneles acoplables — estructura del
+  proyecto (navega al código), propiedades (muestra el registro `D` destino),
+  ventana de mensajes, campos de trabajo, resaltado de sintaxis con dos
+  paletas, digitalización de puntos, y ejecutar/parar en un hilo aparte.
+- **`packaging/`**: `.exe` de un solo archivo, con `--self-test` como criterio
+  de aceptación.
+
+## Cosas que ya se aprendieron a golpes (no repetirlas)
+
+1. **`compiler/grammar.lark` se lee como archivo en runtime.** Cualquier forma
+   de empaquetar o mover el proyecto tiene que llevarlo. Sin él el programa
+   abre bien y falla al compilar, y con `console=False` el error no se ve.
+   `python -m gui.app --self-test` lo detecta.
+2. **No soltar la referencia a un `QThread` que todavía está saliendo.** Qt
+   destruye el objeto C++ por debajo y el proceso *crashea* — no es una
+   excepción, se lleva puesto al pytest sin dejar ni el resumen. Hacer
+   `quit()` + `wait()` antes de poner la referencia en `None`.
+3. **No guardar dicts en los datos de un item de Qt** si el orden importa: se
+   convierten a `QVariantMap`, que está ordenado por clave. Usar lista de
+   pares.
+4. **En modo windowed PyInstaller deja `sys.stdout` en `None`** y un `print()`
+   pelado revienta. Ver `_emit()` en `gui/app.py`.
+5. **PowerShell no espera a un ejecutable sin consola.** `& $exe` devuelve
+   `$LASTEXITCODE` 0 pase lo que pase; hay que usar
+   `Start-Process -Wait -PassThru` y mirar `ExitCode`.
+6. **El resaltado necesita dos paletas.** Una sola pensada para fondo blanco
+   queda ilegible sobre el tema oscuro de Windows. Hay un test de contraste
+   WCAG 3.0:1.
 
 ## Tareas priorizadas
 
-### Tarea A — ~~Codegen de dos pasadas~~ COMPLETADA
-### Tarea B — ~~GUI v0.1~~ COMPLETADA (ver arriba lo que falta afinar)
+### Tarea E — Panel de la GUI para la VM del PLC (siguiente)
 
-Ver `compiler/ast_nodes.py`, `compiler/ast_builder.py`, `compiler/codegen.py`.
-Si tocás estos archivos, correr `pytest tests/ -v` antes de dar por
-terminado — hay 15 tests que cubren lineal + IF/ELSE + PROC/CALL + GUI.
+`comms/plc_client.py` sabe cargar el programa, arrancarlo, pararlo y leer el
+Program Counter en vivo, pero **nadie lo usa**: hoy el "Ejecutar" de la barra
+corre la VM de referencia en la PC, no en el CX3G. Falta el panel que cargue el
+programa compilado y muestre PC + estado + banco de variables en vivo. El poll
+del estado va en un hilo aparte, como `gui/vm_worker.py`, no en el hilo de la
+UI.
 
-Pendiente dentro del compiler, si hay tiempo: soportar `VAR == VAR` en `IF`
-(hoy solo `VAR == CONST`) y una calling convention real para parámetros de
-`PROC` (hoy se parsean pero no hacen nada).
+### Tarea F — Deduplicar la tabla de puntos en el codegen
 
-### Tarea D — Afinar la GUI
+Cada `MOVEJ`/`MOVEL` registra una entrada nueva en `program.points` aunque
+mueva a un `POINT` ya declarado. En el programa de ejemplo: **5 entradas para 2
+puntos declarados**. No es un error de corrección, pero se come los 333 lugares
+que tiene el PLC. Cambia los índices del bytecode, así que hay que hacerlo con
+cuidado y con los tests delante.
 
-- Resaltado de sintaxis (`QSyntaxHighlighter`) sobre el editor.
-- Botón "Digitalizar punto": con el robot conectado, leer
-  `robot.read_world_position()` y agregarlo a una tabla de puntos con
-  nombre editable por el usuario — hoy la tabla de puntos es de solo
-  lectura (se llena desde `program.points` después de compilar).
-- Correr `pytest tests/test_gui_smoke.py -v` (con `QT_QPA_PLATFORM=offscreen`
-  si no hay display) antes de dar por terminada cualquier tarea acá.
+### Tarea G — Persistencia de puntos digitalizados
 
-### Tarea C — Cliente Modbus del PLC (CX3G)
+Decisión de diseño 3 de `docs/ARCHITECTURE.md` (SQLite/JSON en la PC). Hoy
+viven solo en memoria de la GUI y se pierden al cerrarla.
 
-Espejo de `comms/robot_client.py` pero para el PLC en sí (no el robot) —
-necesario para cuando la VM real corra en el CX3G y haya que
-leer/escribir su estado desde la GUI (arrancar/parar la VM, ver el PC
-actual, etc.). Definir el mapeo de registros de control de la VM
-(`docs/INSTRUCTION_SET.md`, sección "Registros de control de la VM") antes
-de escribir el cliente.
+### Otros
+
+- Recordar la disposición de los paneles entre sesiones
+  (`QMainWindow.saveState`).
+- Del lenguaje: no hay bucles (`WHILE`/`FOR`), `IF` solo soporta `==`, `TIMER`
+  se parsea pero no emite nada, y los `OFFSET` se resuelven en compilación.
+- `plc_vm/` (la VM en ladder) sigue bloqueada hasta tener el CX3G delante, y no
+  es delegable: necesita GX Developer/Works2.
+
+### Completadas
+
+Tarea A (codegen de dos pasadas), Tarea B (GUI v0.1), Tarea C (cliente del
+PLC), Tarea D (afinar la GUI).
 
 ## Cómo correr todo
 
 ```bash
 python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-pytest tests/ -v -s
+QT_QPA_PLATFORM=offscreen pytest tests/ -v
+python -m gui.app --self-test
 ```
+
+Para construir el `.exe` (solo en Windows): `.\packaging\build_exe.ps1`
