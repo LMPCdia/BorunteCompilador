@@ -18,9 +18,11 @@ from runtime.bytecode import (
     ADD_VAR,
     ALARM_CLEAR_CONTINUE,
     CALL,
+    COPY_VAR,
     END,
     JUMP,
     JUMP_IF_VAR_NEQ_CONST,
+    JUMP_IF_VAR_NEQ_VAR,
     JUMP_IF_ZERO,
     MOVEJ,
     MOVEL,
@@ -63,10 +65,31 @@ class ReferenceVM:
         self.variables: dict[int, float] = {}
         self.call_stack: list[int] = []
         self.trace = VmTrace()
+        self._stop_requested = False
+        self.stopped_by_request = False
+
+    def request_stop(self) -> None:
+        """Pide que la ejecución corte en el próximo límite de instrucción.
+
+        Pensado para llamarse desde OTRO hilo que el que corre `run_from()`
+        (en la GUI: el hilo de la UI pide, el worker ejecuta). Es un flag
+        booleano, así que no hace falta lock.
+
+        NO interrumpe el movimiento en curso: si el robot está moviéndose,
+        `_exec_move()` está bloqueado en `wait_until_stopped()` y la VM recién
+        corta cuando ese movimiento termina. Para frenar el robot en el
+        momento hay que mandarle la orden a él (ver `VmWorker.stop()`), y un
+        paro de emergencia de verdad va por una línea física, no por Modbus.
+        """
+        self._stop_requested = True
 
     def run_from(self, pc: int = 0) -> None:
         steps = 0
         while 0 <= pc < len(self.program.instructions):
+            if self._stop_requested:
+                self.stopped_by_request = True
+                self.trace.log(f"PC={pc} detenido por pedido del usuario")
+                return
             if steps >= self.max_steps:
                 raise VmError(f"max_steps excedido (posible loop infinito) en PC={pc}")
             steps += 1
@@ -102,6 +125,13 @@ class ReferenceVM:
             elif instr.opcode == JUMP_IF_VAR_NEQ_CONST:
                 value = self.variables.get(instr.a, 0)
                 pc = instr.c if value != instr.b else pc + 1
+            elif instr.opcode == JUMP_IF_VAR_NEQ_VAR:
+                left = self.variables.get(instr.a, 0)
+                right = self.variables.get(instr.b, 0)
+                pc = instr.c if left != right else pc + 1
+            elif instr.opcode == COPY_VAR:
+                self.variables[instr.a] = self.variables.get(instr.b, 0)
+                pc += 1
             elif instr.opcode == CALL:
                 self.call_stack.append(pc + 1)
                 pc = instr.b

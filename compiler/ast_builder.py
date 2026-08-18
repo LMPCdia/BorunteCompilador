@@ -154,11 +154,20 @@ class _AstBuilder(Transformer):
         name, state = args
         return SetOutStmt(str(name), str(state) == "ON")
 
+    def blank_line(self, args):
+        # Línea vacía o solo-comentario: no produce nodo. Las reglas que
+        # acumulan sentencias filtran estos None (ver _stmt_list).
+        return None
+
+    @staticmethod
+    def _stmt_list(args) -> list:
+        return [a for a in args if a is not None]
+
     def then_block(self, args):
-        return list(args)
+        return self._stmt_list(args)
 
     def else_block(self, args):
-        return list(args)
+        return self._stmt_list(args)
 
     def if_stmt(self, args):
         args = _strip_newline(args)
@@ -175,7 +184,7 @@ class _AstBuilder(Transformer):
         return CallStmt(name, call_args)
 
     def proc_body(self, args):
-        return list(args)
+        return self._stmt_list(args)
 
     def proc_decl(self, args):
         args = _strip_newline(args)
@@ -187,7 +196,7 @@ class _AstBuilder(Transformer):
         return ProcDecl(name, params, body)
 
     def start(self, args):
-        return SourceProgram(list(args))
+        return SourceProgram(self._stmt_list(args))
 
     def statement(self, args):
         (stmt,) = args
@@ -197,5 +206,11 @@ class _AstBuilder(Transformer):
 def build_ast(source: str) -> SourceProgram:
     grammar_text = GRAMMAR_PATH.read_text(encoding="utf-8")
     parser = Lark(grammar_text, parser="lalr")
+    # Toda sentencia de la gramática termina en NEWLINE, así que un archivo sin
+    # salto de línea final moría con "Unexpected token $END". Es exactamente lo
+    # que pasa escribiendo en el editor de la GUI sin apretar Enter al final,
+    # así que se tolera acá en vez de hacérselo notar al usuario.
+    if source and not source.endswith("\n"):
+        source += "\n"
     tree = parser.parse(source)
     return _AstBuilder().transform(tree)

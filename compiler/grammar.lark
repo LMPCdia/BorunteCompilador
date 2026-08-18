@@ -1,8 +1,18 @@
-// Gramática v0.1 del DSL tipo KRL para Borunte.
+// Gramática v0.2 del DSL tipo KRL para Borunte.
 // Cubre el subconjunto acordado en docs/INSTRUCTION_SET.md.
 // A ampliar SOLO después del PoC de la VM (ver roadmap).
 
-start: statement*
+start: (statement | blank_line)*
+
+// Una línea que no aporta nada: vacía, o solo un comentario.
+//
+// Hace falta como regla EXPLÍCITA. El `%ignore` de abajo se come el texto del
+// comentario pero NO el salto de línea que lo cierra, así que `; encabezado`
+// en su propia línea dejaba un NEWLINE huérfano que no cerraba ninguna
+// sentencia -> error de sintaxis. Lo mismo con una línea en blanco al
+// principio del archivo. Va en los cuatro lugares donde puede aparecer una
+// lista de sentencias (nivel superior, PROC, y las dos ramas del IF).
+blank_line: NEWLINE
 
 statement: point_decl
          | var_decl
@@ -33,7 +43,7 @@ TYPE.2: "INT" | "REAL" | "BOOL"
 timer_decl: "TIMER" NAME "=" number "s" NEWLINE
 
 proc_decl: "PROC" NAME "(" [NAME ("," NAME)*] ")" NEWLINE proc_body "ENDPROC" NEWLINE
-proc_body: statement*
+proc_body: (statement | blank_line)*
 
 // --- Sentencias ----------------------------------------------------------
 
@@ -50,8 +60,8 @@ set_out_stmt: "SET_OUT" "(" NAME "," STATE ")" NEWLINE
 STATE.2: "ON" | "OFF"
 
 if_stmt: "IF" expr "THEN" NEWLINE then_block ("ELSE" NEWLINE else_block)? "ENDIF" NEWLINE
-then_block: statement*
-else_block: statement*
+then_block: (statement | blank_line)*
+else_block: (statement | blank_line)*
 
 call_stmt: NAME "(" [expr ("," expr)*] ")" NEWLINE
 
