@@ -1,0 +1,9 @@
+# Dependencias SOLO para construir el ejecutable.
+#
+# pyinstaller no va en requirements.txt a proposito: no se necesita ni para
+# desarrollar ni para correr los tests, y meterlo ahi obligaria a todos los que
+# clonan el repo a bajar una herramienta de empaquetado que no van a usar.
+# tests/test_packaging.py verifica que no se filtre.
+#
+#   pip install -r packaging/requirements-build.txt
+pyinstaller>=6.0
