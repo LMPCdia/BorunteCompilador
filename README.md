@@ -1,9 +1,31 @@
 # borunte-dsl
 
-Lenguaje tipo KRL para orquestar un robot Borunte a través de un PLC Coolmay
-CX3G vía Modbus. Ver `docs/ARCHITECTURE.md` primero, y `docs/SIMULATION.md`
-si no tenés el hardware a mano (spoiler: no lo necesitás para seguir
-avanzando).
+Lenguaje tipo KRL para programar un robot Borunte.
+
+**El backend primario compila al formato nativo `.act` del robot**
+(`compiler/act_backend.py`): el programa lo ejecuta el robot mismo, con su
+propio intérprete, y no hace falta escribir ninguna VM. Ver
+`docs/PAD_PROGRAM_FORMAT.md`.
+
+Modbus sigue existiendo para lo que ya estaba documentado: orquestación remota
+(arrancar/pausar/parar un programa ya importado) y coordinación con E/S de celda
+que no está cableada al robot. Ver `docs/MODBUS_REGISTER_MAP.md`.
+
+Empezar por `docs/ARCHITECTURE.md`, y `docs/SIMULATION.md` si no tenés el
+hardware a mano.
+
+## Los dos backends de compilación
+
+Los dos parten del mismo AST y emiten cosas distintas:
+
+| Backend | Emite | Lo ejecuta | Estado |
+|---|---|---|---|
+| **`compiler/act_backend.py`** | Programa `.act` nativo | **El robot** | **Primario.** El formato salió de ingeniería inversa sobre un export real |
+| `compiler/codegen.py` | Bytecode de 8 words | Una VM en el PLC | Anterior. Funciona, pero la VM en ladder no existe |
+
+El backend `.act` evita el bloque de trabajo más grande que quedaba —escribir la
+VM en ladder— a cambio de aceptar las restricciones del formato nativo (sin
+variables internas, sin `ELSE`, sin bucles).
 
 ## Estado actual
 
@@ -41,8 +63,13 @@ avanzando).
       puntos, y ejecutar/parar en un hilo aparte con log en vivo
 - [x] **Empaquetado**: `dist/BorunteDSL.exe` de un solo archivo, con
       `--self-test` como criterio de aceptación
-- [x] **231 tests en verde**, incluidos 18 que verifican que la VM de
-      referencia y la VM del PLC **coincidan** ejecutando el mismo programa
+- [x] **Backend `.act`** (`compiler/act_backend.py`) + su lector
+      (`compiler/act_reader.py`): compila el DSL al formato nativo del robot.
+      `BASE`/`TOOL`, `MOVEJ`/`MOVEL`, `SET_OUT`, `WAIT`, `IF INPUT(...)`,
+      `PROC`/llamadas. Ver `docs/PAD_PROGRAM_FORMAT.md`
+- [x] **275 tests en verde**, incluidos 18 que verifican que la VM de
+      referencia y la VM del PLC coincidan, y un round-trip byte a byte de un
+      export real de 338 KB del robot
 - [ ] VM en ladder/IL para el CX3G real (bloqueada hasta tener hardware)
 
 ## Lo que NO está confirmado contra hardware
@@ -70,7 +97,23 @@ ordenadas por riesgo):
 bloque `800-890` y disparar "Start" mueva el robot, y con qué latencia por
 transacción.
 
-## Limitaciones conocidas (documentadas a propósito, no bugs escondidos)
+## Limitaciones del backend `.act`
+
+Son restricciones del formato nativo, no cosas por hacer. Todas levantan
+`ActCompileError` con una explicación, nunca generan algo aproximado:
+
+- **No hay `ELSE`.** En las 1032 acciones del export real no aparece ningún
+  salto incondicional, que es lo que haría falta para saltear la segunda rama.
+  Se escribe como dos `IF` con condiciones opuestas.
+- **`IF` solo sobre entradas físicas** (`IF INPUT(X003) == ON`). No hay opcode
+  nativo confirmado que compare variables internas.
+- **No hay variables internas** (`VAR`) ni `TIMER`. El estado se lleva con
+  entradas y salidas.
+- **`PROC` sin parámetros y con id explícito** (`PROC HOME(id=1)`): la llamada
+  nativa solo lleva el número de subprograma.
+- **No hay `WAIT_IN`**: la espera nativa es por tiempo, no por entrada.
+
+## Limitaciones conocidas del backend de bytecode del PLC
 
 Del compilador:
 
@@ -148,7 +191,10 @@ el primer programa — y con `console=False` ese error no se ve en ninguna parte
 ## Estructura
 
 ```
-compiler/    parser (Lark) + AST de dos pasadas + codegen → bytecode
+compiler/    parser (Lark) + AST de dos pasadas, y DOS backends:
+             act_backend.py → .act nativo del robot (primario)
+             act_reader.py  → parser inverso del .act
+             codegen.py     → bytecode para la VM del PLC
 comms/       robot_client.py (robot), plc_client.py (PLC CX3G),
              robot_simulator.py + plc_simulator.py + fake_modbus.py (para
              probar los dos niveles sin hardware)
@@ -162,8 +208,8 @@ packaging/   spec de PyInstaller, build_exe.ps1, datafiles.py
 plc_vm/      SOLO documentación — la VM real se escribe a mano en
              GX Developer/Works2 una vez validado el contrato con hardware
 tests/
-docs/        ARCHITECTURE.md, MODBUS_REGISTER_MAP.md, INSTRUCTION_SET.md,
-             SIMULATION.md
+docs/        ARCHITECTURE.md, PAD_PROGRAM_FORMAT.md (formato .act),
+             MODBUS_REGISTER_MAP.md, INSTRUCTION_SET.md, SIMULATION.md
 ```
 
 ## Dos formas de ejecutar un programa (no confundirlas)

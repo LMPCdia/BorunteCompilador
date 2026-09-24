@@ -27,13 +27,30 @@ class VarRef:
 
 
 @dataclass
+class InputRef:
+    """Estado de una entrada FISICA del robot: INPUT(X012).
+
+    Distinto de VarRef, que es una variable interna. El backend .act solo sabe
+    condicionar sobre esto (accion nativa 10001); no hay opcode confirmado para
+    comparar variables internas.
+    """
+    name: str
+
+
+@dataclass
+class StateConst:
+    """ON / OFF como valor de expresion, para IF INPUT(X) == ON."""
+    on: bool
+
+
+@dataclass
 class BinOp:
     op: str  # "==", "!=", "+", "-"
     left: "Expr"
     right: "Expr"
 
 
-Expr = Const | VarRef | BinOp
+Expr = Const | VarRef | InputRef | StateConst | BinOp
 
 # --- Puntos ------------------------------------------------------------------
 
@@ -117,6 +134,18 @@ class IfStmt:
 
 
 @dataclass
+class BaseStmt:
+    """Selecciona la coordenada de base. Accion nativa 800."""
+    coord_id: int
+
+
+@dataclass
+class ToolStmt:
+    """Selecciona la herramienta. Accion nativa 801."""
+    tool_id: int
+
+
+@dataclass
 class CallStmt:
     name: str
     args: list[Expr] = field(default_factory=list)
@@ -127,6 +156,10 @@ class ProcDecl:
     name: str
     params: list[str]
     body: list["Stmt"]
+    #: Id explicito de la entrada en la biblioteca del robot: PROC HOME(id=1).
+    #: Lo necesita el backend .act; el backend de bytecode del PLC lo ignora.
+    #: Son mutuamente excluyentes: un PROC tiene params o tiene id, no los dos.
+    proc_id: int | None = None
 
 
 Stmt = (
@@ -141,6 +174,8 @@ Stmt = (
     | IfStmt
     | CallStmt
     | ProcDecl
+    | BaseStmt
+    | ToolStmt
 )
 
 

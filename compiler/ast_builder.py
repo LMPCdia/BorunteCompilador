@@ -14,10 +14,12 @@ from lark import Lark, Token, Transformer
 from comms.robot_client import Pose
 from compiler.ast_nodes import (
     Assignment,
+    BaseStmt,
     BinOp,
     CallStmt,
     Const,
     IfStmt,
+    InputRef,
     MoveStmt,
     PointDecl,
     PointLiteral,
@@ -26,7 +28,9 @@ from compiler.ast_nodes import (
     ProcDecl,
     SetOutStmt,
     SourceProgram,
+    StateConst,
     TimerDecl,
+    ToolStmt,
     VarDecl,
     VarRef,
     WaitInStmt,
@@ -51,7 +55,7 @@ class _AstBuilder(Transformer):
 
     @staticmethod
     def _to_expr(value):
-        if isinstance(value, (Const, VarRef, BinOp)):
+        if isinstance(value, (Const, VarRef, BinOp, InputRef, StateConst)):
             return value
         if isinstance(value, bool):
             return Const(1.0 if value else 0.0)
@@ -76,6 +80,14 @@ class _AstBuilder(Transformer):
     def sub(self, args):
         left, right = args
         return BinOp("-", self._to_expr(left), self._to_expr(right))
+
+    def input_expr(self, args):
+        (name,) = args
+        return InputRef(str(name))
+
+    def state_const(self, args):
+        (tok,) = args
+        return StateConst(str(tok) == "ON")
 
     def NAME(self, tok):  # noqa: N802
         return str(tok)
@@ -149,6 +161,14 @@ class _AstBuilder(Transformer):
             return WaitTimeStmt(seconds=float(args[0]))
         return WaitTimeStmt(until_move_done=True)
 
+    def base_stmt(self, args):
+        args = _strip_newline(args)
+        return BaseStmt(int(args[0]))
+
+    def tool_stmt(self, args):
+        args = _strip_newline(args)
+        return ToolStmt(int(args[0]))
+
     def set_out_stmt(self, args):
         args = _strip_newline(args)
         name, state = args
@@ -186,14 +206,38 @@ class _AstBuilder(Transformer):
     def proc_body(self, args):
         return self._stmt_list(args)
 
+    def proc_id(self, args):
+        clave, valor = args
+        if str(clave) != "id":
+            raise ValueError(
+                f"En el encabezado de un PROC solo se acepta 'id=<numero>', "
+                f"no {clave!r}={valor!r}"
+            )
+        return ("id", int(valor))
+
+    def proc_param_list(self, args):
+        return ("params", [str(a) for a in args])
+
+    def proc_header(self, args):
+        (header,) = args
+        return header
+
     def proc_decl(self, args):
         args = _strip_newline(args)
         args = [a for a in args if a is not None]
         name = str(args[0])
-        # args puede incluir params (NAME sueltos) antes del proc_body (una lista)
         body = args[-1]
-        params = [str(p) for p in args[1:-1]]
-        return ProcDecl(name, params, body)
+        header = args[1] if len(args) > 2 else None
+
+        params: list[str] = []
+        proc_id = None
+        if header is not None:
+            clase, valor = header
+            if clase == "id":
+                proc_id = valor
+            else:
+                params = valor
+        return ProcDecl(name, params, body, proc_id=proc_id)
 
     def start(self, args):
         return SourceProgram(self._stmt_list(args))
