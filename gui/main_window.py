@@ -5,7 +5,7 @@ propiedades a la derecha, mensajes y log abajo, y el editor / bytecode /
 puntos en el centro.
 
     ┌───────────────── menú + barra de herramientas ─────────────────┐
-    │ Estructura   │ Programa │ Bytecode │ Puntos │ Pad │ Propiedades │
+    │ Estructura   │ Programa │ Bytecode │ Puntos │ Pad │ Sim 3D │ Prop. │
     │ del proyecto │                                    │             │
     ├──────────────┤                                    │             │
     │ Campos de    │                                    │             │
@@ -50,6 +50,7 @@ from gui.connection_panel import ConnectionPanel
 from gui.message_window import MessageWindow
 from gui.project_tree import POSE_AXIS_NAMES, ProjectTree
 from gui.properties_panel import PropertiesPanel
+from gui.sim_view import SimView
 from gui.syntax_highlighter import DslSyntaxHighlighter
 from gui.vm_worker import VmWorker
 from gui.work_fields import WorkFieldsPanel, field_by_key
@@ -134,6 +135,11 @@ class MainWindow(QMainWindow):
         self.pad_view.setReadOnly(True)
         self.pad_view.setFont(QFont(MONOSPACE, 10))
         self.tabs.addTab(self.pad_view, "Pad")
+
+        # Simulación 3D del respaldo del pad (sim/). La vista 3D solo se crea
+        # si hay OpenGL: ver gui/viewport3d.py.
+        self.sim_view = SimView(self.editor.toPlainText, report=self._sim_report)
+        self.tabs.addTab(self.sim_view, "Simulación 3D")
 
     def _build_points_tab(self) -> QWidget:
         container = QWidget()
@@ -439,6 +445,12 @@ class MainWindow(QMainWindow):
                 f"posiciones distintas (no se deduplica).",
                 "compilador",
             )
+
+    def _sim_report(self, severity: str, message: str) -> None:
+        {"info": self.messages.info, "warning": self.messages.warning,
+         "error": self.messages.error}[severity](message, "simulador")
+        if severity == "error":
+            self._show_messages_dock()
 
     # -- exportar al pad ----------------------------------------------------------
 

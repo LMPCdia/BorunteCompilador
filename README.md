@@ -21,6 +21,11 @@ Leer primero `docs/ARCHITECTURE.md` y `docs/PAD_FORMAT.md`.
       PC, contra el simulador del robot (`comms/robot_simulator.py`)
 - [x] Cliente Modbus del robot (`comms/robot_client.py`) para digitalizar puntos
 - [x] GUI (PySide6) con "Exportar para el pad" (Ctrl+E)
+- [x] **Simulador 3D** (`sim/`, pestaña "Simulación 3D"): ejecuta el respaldo
+      del pad sobre el modelo del robot, avisa ejes fuera de rango, puntos
+      inalcanzables y singularidades, estima el tiempo de ciclo, y arma el
+      layout importando STEP/STL/OBJ. Modelo cargado: BRTIRUS1820A. Ver
+      `docs/SIMULATOR.md`
 - [x] Ejecutable de Windows de un solo archivo, construido en GitHub Actions
 - [ ] **Probar en el pad** un respaldo generado (nadie lo hizo todavía)
 - [ ] Espera de entrada, `ELSE` y variables en el pad (falta un ejemplo del
@@ -132,6 +137,8 @@ el primer programa — y con `console=False` ese error no se ve en ninguna parte
 ```
 compiler/    gramática (Lark) + AST + pad_codegen.py (respaldo del pad)
              + codegen.py (bytecode para la VM de referencia)
+sim/         kinematics.py, pad_sim.py (simulador), meshes.py, scene.py,
+             models/*.json (un archivo por modelo de robot)
 pad/         backup.py (leer/escribir HCBackupRobot_*.zip), listing.py
              (listado legible), template.fnc
 comms/       robot_client.py (Modbus del robot), robot_simulator.py +

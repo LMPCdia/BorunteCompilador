@@ -14,6 +14,36 @@ python -m sim.check programa.krlb
 python -m sim.check HCBackupRobot_*.zip --model BRTIRUS1820A --input X012=1
 ```
 
+En la app: pestaña **Simulación 3D** → elegir el robot, escribir las
+entradas activas (`X012=1`) y **Simular**. El robot se anima con ▶ o con la
+barra de tiempo; los problemas van a la ventana de mensajes.
+
+## Layout de la celda
+
+**Importar objeto…** acepta **STEP**, STL y OBJ (mm). La pieza se apoya en el
+piso (z = 0) y se ubica con la tabla: X, Y, Z respecto de la base del robot y
+giro alrededor del eje vertical. **Guardar layout…** escribe un
+`.layout.json` con rutas relativas, así la carpeta se puede mover entera.
+
+Los STEP se convierten a triángulos con **gmsh** (dependencia nueva, trae
+OpenCascade; suma ~60 MB al `.exe`). La malla es gruesa a propósito: alcanza
+para ver la celda, no para medir.
+
+## Modelos 3D del robot
+
+Mientras no estén los modelos del fabricante, el robot se dibuja con
+cilindros a partir de las cotas. Para usar los modelos reales: exportar del
+CAD **un archivo por eslabón** (base, J1…J6) **en la posición cero**, en mm
+y en el sistema de la base, guardarlos en `sim/models/<MODELO>/` y listarlos
+en el JSON del modelo:
+
+```json
+"meshes": ["base.stl", "j1.stl", "j2.stl", "j3.stl", "j4.stl", "j5.stl", "j6.stl"]
+```
+
+Con producto de exponenciales cada eslabón dibujado en la posición cero se
+ubica solo; no hace falta ningún ajuste extra.
+
 ## Piezas
 
 | Archivo | Qué hace |
@@ -22,6 +52,9 @@ python -m sim.check HCBackupRobot_*.zip --model BRTIRUS1820A --input X012=1
 | `sim/kinematics.py` | Cinemática directa (ejes → brida) e inversa (brida → ejes, Levenberg-Marquardt buscando cerca de la configuración actual). Python puro |
 | `sim/pad_sim.py` | Intérprete de las acciones del pad: MOVEJ, MOVEL, WAIT, SET_OUT, IF→GOTO, CALL |
 | `sim/check.py` | Línea de comandos |
+| `sim/meshes.py` | Carga de STEP (gmsh), STL y OBJ; primitivas |
+| `sim/scene.py` | Eslabones del robot, layout (JSON) y línea de tiempo |
+| `gui/sim_view.py`, `gui/viewport3d.py` | Pestaña "Simulación 3D" y vista Qt3D |
 
 ## Modelo geométrico
 
@@ -65,6 +98,9 @@ está bien; si no, la diferencia dice qué eje está invertido o desfasado.
 
 - Los `MOVEL` con herramienta o coordenadas distintas de 0 se saltean (hace
   falta cargar esos marcos del pad).
-- Sin colisiones todavía (llega con el visor 3D y el layout).
+- Sin detección de colisiones todavía: el layout se ve, pero no se chequea
+  contra el robot.
+- La vista 3D necesita OpenGL. Sin él (máquinas virtuales, escritorio
+  remoto viejo) la pestaña muestra un aviso y la simulación funciona igual.
 - `WAIT_IN` no existe en el pad todavía; los `IF` usan los estados de entrada
   que se pasan con `--input`.

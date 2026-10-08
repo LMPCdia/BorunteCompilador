@@ -40,7 +40,7 @@ respaldo real; la lógica se prueba contra `comms/robot_simulator.py`.
    `docs/MODBUS_REGISTER_MAP.md`.
 6. **No agregues dependencias nuevas sin decirlo explícitamente en tu
    resumen final.** El stack es: `lark` (parser), `pymodbus` (Modbus),
-   `PySide6` (GUI), `pytest` (tests). Cualquier librería nueva debe
+   `PySide6` (GUI y 3D con Qt3D), `gmsh` (lectura de STEP), `pytest` (tests). Cualquier librería nueva debe
    justificarse.
 
 ## Estado actual (ver también README.md, que puede estar más actualizado)
@@ -57,6 +57,10 @@ respaldo real; la lógica se prueba contra `comms/robot_simulator.py`.
   solo para simular la lógica en la PC.
 - **`comms/robot_client.py`**: Modbus del robot, para digitalizar puntos y
   simular contra el robot real.
+- **`sim/`**: simulador cinemático del respaldo del pad (modelo
+  BRTIRUS1820A del plano del fabricante; el 1510A, que es el robot de la
+  celda, está pendiente de su plano). Pestaña "Simulación 3D" con layout de
+  piezas STEP/STL/OBJ. Ver `docs/SIMULATOR.md`.
 - **GUI** (`gui/`): "Exportar para el pad" (Ctrl+E) + pestaña "Pad" con el
   listado; compilar/ejecutar en la VM; digitalizar puntos.
 - **`packaging/`** + `.github/workflows/build-exe.yml`: `.exe` de un solo
@@ -81,7 +85,13 @@ respaldo real; la lógica se prueba contra `comms/robot_simulator.py`.
 5. **PowerShell no espera a un ejecutable sin consola.** `& $exe` devuelve
    `$LASTEXITCODE` 0 pase lo que pase; hay que usar
    `Start-Process -Wait -PassThru` y mirar `ExitCode`.
-6. **El resaltado necesita dos paletas.** Una sola pensada para fondo blanco
+6. **Qt3D sin OpenGL hace caer el proceso** (segmentation fault, no
+   excepción). `gui/viewport3d.py: opengl_available()` se consulta SIEMPRE
+   antes de crear la vista, y los tests nunca la construyen. Para verla en un
+   contenedor: `xvfb-run` + `QT_QPA_PLATFORM=xcb`.
+7. **gmsh carga su DLL con ctypes**: PyInstaller no la ve. El spec la agrega
+   a mano (`GMSH_BINARIES`) y el self-test importa un STEP para verificarlo.
+8. **El resaltado necesita dos paletas.** Una sola pensada para fondo blanco
    queda ilegible sobre el tema oscuro de Windows. Hay un test de contraste
    WCAG 3.0:1.
 

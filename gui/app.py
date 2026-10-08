@@ -143,6 +143,39 @@ def _self_test() -> int:
 
     paso("generar un respaldo para el pad", exportar_al_pad)
 
+    def simular_y_leer_step():
+        # gmsh (lector de STEP) trae una DLL nativa que PyInstaller no ve por
+        # imports: si el spec no la incluye, se ve acá.
+        import tempfile
+        from pathlib import Path
+
+        import gmsh
+
+        from compiler.pad_codegen import compile_to_pad
+        from sim.kinematics import RobotModel
+        from sim.meshes import load_step
+        from sim.pad_sim import simulate
+
+        result = simulate(
+            compile_to_pad("MOVEJ JOINT(0, 45, -45, 0, -75, 0) SPEED 50\n"),
+            RobotModel.load("BRTIRUS1820A"),
+        )
+        assert result.ok and result.total_time_s > 0, "la simulación no corrió"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            step = Path(tmp) / "caja.step"
+            gmsh.initialize(interruptible=False)
+            try:
+                gmsh.option.setNumber("General.Terminal", 0)
+                gmsh.model.occ.addBox(0, 0, 0, 100, 50, 20)
+                gmsh.model.occ.synchronize()
+                gmsh.write(str(step))
+            finally:
+                gmsh.finalize()
+            assert len(load_step(step)) > 0, "el STEP no tiene triángulos"
+
+    paso("simular en BRTIRUS1820A e importar un STEP (gmsh)", simular_y_leer_step)
+
     _emit()
     fallas = 0
     for nombre, ok, detalle in pasos:

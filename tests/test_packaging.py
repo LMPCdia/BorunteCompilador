@@ -147,9 +147,9 @@ def test_pyinstaller_is_in_the_build_requirements():
     assert "pyinstaller" in build_reqs
 
 
-def test_runtime_requirements_still_list_the_four_real_dependencies():
+def test_runtime_requirements_still_list_the_real_dependencies():
     requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8").lower()
-    for package in ("lark", "pymodbus", "pyside6", "pytest"):
+    for package in ("lark", "pymodbus", "pyside6", "pytest", "gmsh"):
         assert package in requirements, f"falta {package} en requirements.txt"
 
 

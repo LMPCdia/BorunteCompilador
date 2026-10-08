@@ -1,0 +1,151 @@
+"""
+Lo que el visor 3D necesita y se puede probar sin placa de video:
+
+- `robot_link_meshes`: un `Mesh` por eslabón (base + J1..J6) en la posición
+  cero, en coordenadas del mundo. Si el JSON del modelo trae `"meshes"` (un
+  archivo por eslabón, exportado del CAD del fabricante en la posición cero),
+  se usan esos; si no, piezas simples a partir de las cotas.
+- `Layout`: los objetos importados para armar la celda, guardables en JSON.
+- `Timeline`: la trayectoria simulada como función del tiempo.
+
+Con producto de exponenciales, cada eslabón dibujado en la posición cero se
+ubica con `model.joint_frames(q)[i]`: no hace falta ningún otro ajuste.
+"""
+
+from __future__ import annotations
+
+import bisect
+import json
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+
+from sim.kinematics import MODELS_DIR, RobotModel
+from sim.meshes import Mesh, box, cylinder, load_mesh
+from sim.pad_sim import SimResult
+
+LINK_NAMES = ["base", "J1", "J2", "J3", "J4", "J5", "J6"]
+
+
+def robot_link_meshes(model: RobotModel) -> list[Mesh]:
+    files = _mesh_files(model)
+    if files:
+        return [load_mesh(f) for f in files]
+    return _simple_links(model)
+
+
+def _mesh_files(model: RobotModel) -> list[Path] | None:
+    data = json.loads((MODELS_DIR / f"{model.name}.json").read_text(encoding="utf-8"))
+    names = data.get("meshes")
+    if not names:
+        return None
+    files = [MODELS_DIR / model.name / n for n in names]
+    return files if all(f.exists() for f in files) else None
+
+
+def _simple_links(m: RobotModel) -> list[Mesh]:
+    z2, z3 = m.d1, m.d1 + m.a2
+    zw, xw = z3 + m.a3, m.a1 + m.d4
+    x4 = m.a1 + m.d4 * 0.35  # dónde empieza la parte del antebrazo que gira con J4
+    base_h = m.d1 * 0.55
+    return [
+        cylinder((0, 0, 0), (0, 0, base_h), 160).extend(box((0, 0, 15), (350, 350, 30))),
+        cylinder((0, 0, base_h), (0, 0, z2), 130)
+        .extend(cylinder((m.a1, -110, z2), (m.a1, 110, z2), 110)),
+        cylinder((m.a1, 0, z2), (m.a1, 0, z3), 75)
+        .extend(cylinder((m.a1, -95, z2), (m.a1, 95, z2), 95)),
+        cylinder((m.a1, -85, z3), (m.a1, 85, z3), 85)
+        .extend(cylinder((m.a1, 0, z3), (m.a1, 0, zw), 70))
+        .extend(cylinder((m.a1, 0, zw), (x4, 0, zw), 70)),
+        cylinder((x4, 0, zw), (xw - 40, 0, zw), 55),
+        cylinder((xw, -55, zw), (xw, 55, zw), 50),
+        cylinder((xw, 0, zw), (xw + m.d6, 0, zw), 38)
+        .extend(cylinder((xw + m.d6, 0, zw), (xw + m.d6 + 60, 0, zw), 6)),  # eje de la herramienta
+    ]
+
+
+# --- layout -------------------------------------------------------------------------
+
+
+@dataclass
+class LayoutObject:
+    name: str
+    path: str                 # archivo STEP/STL/OBJ
+    x: float = 0.0            # mm, respecto de la base del robot
+    y: float = 0.0
+    z: float = 0.0
+    rz: float = 0.0           # grados alrededor del eje vertical
+    color: str = "#9aa4ad"
+
+
+@dataclass
+class Layout:
+    model: str = "BRTIRUS1820A"
+    objects: list[LayoutObject] = field(default_factory=list)
+
+    def save(self, path: str | Path) -> None:
+        path = Path(path)
+        data = {"model": self.model, "objects": []}
+        for obj in self.objects:
+            item = asdict(obj)
+            # Rutas relativas al layout, para poder mover la carpeta entera.
+            try:
+                item["path"] = str(Path(obj.path).resolve().relative_to(path.resolve().parent))
+            except ValueError:
+                pass
+            data["objects"].append(item)
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    @classmethod
+    def load(cls, path: str | Path) -> "Layout":
+        path = Path(path)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        objects = []
+        for item in data.get("objects", []):
+            obj = LayoutObject(**item)
+            if not Path(obj.path).is_absolute():
+                obj.path = str(path.parent / obj.path)
+            objects.append(obj)
+        return cls(model=data.get("model", "BRTIRUS1820A"), objects=objects)
+
+
+# --- línea de tiempo -----------------------------------------------------------------
+
+
+class Timeline:
+    """Ángulos de los ejes en función del tiempo, a partir de una simulación."""
+
+    def __init__(self, result: SimResult, start_deg: list[float] | None = None) -> None:
+        self.times: list[float] = [0.0]
+        self.poses: list[list[float]] = [list(start_deg or [0.0] * 6)]
+        self.labels: list[str] = [""]
+        t = 0.0
+        for seg in result.segments:
+            samples = seg.samples
+            if seg.kind == "WAIT" or len(samples) < 2:
+                t += seg.duration_s
+                self._append(t, samples[-1], seg.where)
+                continue
+            for i, q in enumerate(samples[1:], start=1):
+                self._append(t + seg.duration_s * i / (len(samples) - 1), q, seg.where)
+            t += seg.duration_s
+
+    def _append(self, t: float, q: list[float], where: str) -> None:
+        self.times.append(t)
+        self.poses.append(list(q))
+        self.labels.append(where)
+
+    @property
+    def duration(self) -> float:
+        return self.times[-1]
+
+    def at(self, t: float) -> tuple[list[float], str]:
+        """Ángulos interpolados en `t` y la instrucción que se está ejecutando."""
+        if t <= 0:
+            return self.poses[0], self.labels[0]
+        if t >= self.duration:
+            return self.poses[-1], self.labels[-1]
+        i = bisect.bisect_right(self.times, t)
+        t0, t1 = self.times[i - 1], self.times[i]
+        f = 0.0 if t1 == t0 else (t - t0) / (t1 - t0)
+        q = [a + (b - a) * f for a, b in zip(self.poses[i - 1], self.poses[i])]
+        return q, self.labels[i]
