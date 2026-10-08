@@ -1,11 +1,11 @@
 """
 Simulador cinemático (`sim/`).
 
-Lo que está fijado contra el plano del fabricante del BRTIRUS1820A: el
-alcance máximo (1731.5 mm) y la altura máxima (2056 mm) del "P point" (centro
-de la muñeca). El resto (sentidos de giro, convención U/V/W) son hipótesis
-documentadas en docs/SIMULATOR.md: estos tests fijan que el código sea
-coherente consigo mismo, no que coincida con el robot.
+Fijado contra el plano del fabricante del BRTIRUS1820A: el alcance máximo
+(1731.5 mm) y la altura máxima (2056 mm) del "P point" (centro de la
+muñeca). Fijado contra un respaldo real: el HOME queda recogido y con la
+herramienta hacia abajo. El resto (convención U/V/W, J4/J6) son hipótesis
+documentadas en docs/SIMULATOR.md: los tests fijan coherencia, no verdad.
 """
 
 import math
@@ -13,17 +13,36 @@ import random
 
 import pytest
 
-from compiler.pad_codegen import compile_to_pad
+from compiler.pad_codegen import PadOptions, compile_to_pad
 from sim.check import main as check_main
-from sim.kinematics import RobotModel, matrix_to_pose, pose_error, pose_matrix
-from sim.pad_sim import simulate
+from sim.kinematics import (
+    RobotModel,
+    identity,
+    mat_mul,
+    matrix_to_pose,
+    pose_error,
+    pose_matrix,
+    rot_axis,
+)
+from sim.pad_sim import Cancelled, PadSimulator, invert, simulate
 
 HOME = [0.347, 45.894, -44.865, -0.792, -75.952, -0.859]
+JHOME = f"JOINT({', '.join(map(str, HOME))})"
+UNVERIFIED = PadOptions(allow_unverified=True)
 
 
 @pytest.fixture(scope="module")
 def model():
     return RobotModel.load("BRTIRUS1820A")
+
+
+def _pad(src, **kw):
+    return compile_to_pad(src, PadOptions(allow_unverified=True, **kw))
+
+
+def _world_of(model, q, dx=0.0, dy=0.0, dz=0.0):
+    x, y, z, u, v, w = matrix_to_pose(model.fk(q))
+    return f"WORLD({x + dx:.3f}, {y + dy:.3f}, {z + dz:.3f}, {u:.3f}, {v:.3f}, {w:.3f})"
 
 
 # --- modelo y cinemática directa ------------------------------------------------
@@ -41,20 +60,20 @@ def test_zero_pose_matches_the_drawing(model):
 
 
 def test_wrist_reach_matches_the_drawing(model):
-    # Brazo estirado hacia adelante (J2 = 90 - atan(100/825.5) tiene que
-    # entrar en rango solo como chequeo geométrico, sin límites).
-    stretch = math.degrees(math.atan2(100, 825.5))
-    up = model.wrist_center([0, 0, -(90 - stretch), 0, 0, 0])
-    assert up[2] == pytest.approx(2056, abs=0.5)        # cota "2056"
+    # Antebrazo girado hasta quedar alineado con el brazo (sin mirar rangos).
+    stretch = 90 - math.degrees(math.atan2(100, 825.5))
+    up = max(model.wrist_center([0, 0, s, 0, 0, 0])[2] for s in (stretch, -stretch))
+    assert up == pytest.approx(2056, abs=0.5)                 # cota "2056"
     reach = 170 + 730 + math.hypot(825.5, 100)
-    assert reach == pytest.approx(model.reach_mm, abs=0.1)  # cota "1731.5"
+    assert reach == pytest.approx(model.reach_mm, abs=0.1)    # cota "1731.5"
 
 
-def test_home_points_the_tool_down(model):
-    # Del HOME de un programa real: herramienta hacia abajo. Es la evidencia
-    # del sentido de giro de J5 (ver docs/SIMULATOR.md).
+def test_home_is_tucked_with_the_tool_down(model):
+    # HOME de un programa real: es la evidencia de los sentidos de J2, J3 y J5
+    # (docs/SIMULATOR.md). Con J2/J3 al revés quedaba casi estirado.
     flange = model.fk(HOME)
-    assert flange[2][2] < -0.9
+    assert flange[2][2] < -0.9          # herramienta hacia abajo
+    assert flange[0][3] < 800           # brida recogida, no estirada
 
 
 def test_limits(model):
@@ -63,9 +82,29 @@ def test_limits(model):
     assert model.out_of_limits([0, 71, -90, 0, 0, 0]) == [1, 2]
 
 
+def test_wrap_into_limits_picks_the_turn_inside_the_range(model):
+    q = model.wrap_into_limits([0, 0, 0, 190, 0, 0], [0, 0, 0, 170, 0, 0])
+    assert q[3] == pytest.approx(-170)
+
+
 def test_pose_matrix_roundtrip():
     pose = (100.0, -200.0, 300.0, 162.6, -14.0, 148.1)
     assert matrix_to_pose(pose_matrix(*pose)) == pytest.approx(pose, abs=1e-9)
+
+
+def test_rotation_error_is_exact_at_180_degrees():
+    rng = random.Random(3)
+    for _ in range(500):
+        axis = [rng.gauss(0, 1) for _ in range(3)]
+        n = math.sqrt(sum(a * a for a in axis))
+        axis = tuple(a / n for a in axis)
+        angle = rng.choice([math.pi, math.pi - 1e-7, math.pi - 1e-4, rng.uniform(0, math.pi)])
+        r = rot_axis(axis, angle)
+        m = [r[0] + [0], r[1] + [0], r[2] + [0], [0, 0, 0, 1]]
+        v = pose_error(identity(), m)[3:]
+        size = math.sqrt(sum(x * x for x in v))
+        back = rot_axis(tuple(x / size for x in v), size)
+        assert max(abs(back[i][j] - r[i][j]) for i in range(3) for j in range(3)) < 1e-9
 
 
 # --- cinemática inversa --------------------------------------------------------------
@@ -96,72 +135,67 @@ def test_ik_fails_out_of_reach(model):
 # --- simulación de un respaldo del pad -----------------------------------------------
 
 
-def _world_of(model, q, dx=0.0, dy=0.0, dz=0.0):
-    x, y, z, u, v, w = matrix_to_pose(model.fk(q))
-    return f"WORLD({x + dx:.3f}, {y + dy:.3f}, {z + dz:.3f}, {u:.3f}, {v:.3f}, {w:.3f})"
+def test_first_movej_places_the_robot_without_time(model):
+    result = simulate(_pad(f"MOVEJ {JHOME} SPEED 50\nWAIT 1s\n"), model)
+    assert result.start_deg == HOME
+    assert result.total_time_s == pytest.approx(1)  # solo el WAIT
+
+
+def test_movel_before_any_movej_is_not_evaluated(model):
+    result = simulate(_pad(f"MOVEL {_world_of(model, HOME)} SPEED 20\nMOVEJ {JHOME} SPEED 50\n"),
+                      model)
+    assert result.ok and result.skipped_moves == 1
+    assert "no se sabía dónde estaba el robot" in result.issues[0].message
 
 
 def test_simple_program_runs_without_issues(model):
-    src = f"""POINT casa = JOINT({', '.join(map(str, HOME))})
+    src = f"""POINT casa = {JHOME}
 MOVEJ casa SPEED 50
 MOVEL {_world_of(model, HOME, dy=200, dz=-150)} SPEED 20
 SET_OUT(Y010, ON)
 WAIT 0.5s
 MOVEJ casa SPEED 50
 """
-    result = simulate(compile_to_pad(src), model)
+    result = simulate(_pad(src), model)
     assert result.ok, result.issues
     assert [s.kind for s in result.segments] == ["MOVEJ", "MOVEL", "WAIT", "MOVEJ"]
     assert result.outputs and result.outputs[0][1:] == (0, True)
     assert result.total_time_s > 0.5
+    assert result.total_moves == 3 and result.skipped_moves == 0
 
 
-def test_movel_follows_a_straight_line(model):
-    src = f"""MOVEJ JOINT({', '.join(map(str, HOME))}) SPEED 50
-MOVEL {_world_of(model, HOME, dz=-200)} SPEED 20
-"""
-    result = simulate(compile_to_pad(src), model)
-    movel = result.segments[1]
-    start = model.fk(movel.samples[0])
+def test_movel_keeps_the_tool_tip_on_a_straight_line(model):
+    tool = [0, 0, 400, 0, 0, 0]
+    tip = matrix_to_pose(mat_mul(model.fk(HOME), pose_matrix(*tool)))
+    target = list(tip)
+    target[1] += 250
+    target[3] += 15  # además gira: la brida describe un arco, la punta no
+    src = (f"MOVEJ {JHOME} SPEED 50\nTOOL 1\nMOVEL WORLD({', '.join(f'{v:.4f}' for v in target)}) "
+           f"SPEED 20\n")
+    result = PadSimulator(model, tools={1: tool}).run(_pad(src))
+    assert result.ok, result.issues
+    movel = result.segments[-1]
+    p0 = mat_mul(model.fk(movel.samples[0]), pose_matrix(*tool))
+    p1 = mat_mul(model.fk(movel.samples[-1]), pose_matrix(*tool))
+    a = [p0[i][3] for i in range(3)]
+    b = [p1[i][3] for i in range(3)]
     for q in movel.samples:
-        p = model.fk(q)
-        assert p[0][3] == pytest.approx(start[0][3], abs=0.05)
-        assert p[1][3] == pytest.approx(start[1][3], abs=0.05)
-
-
-def test_joint_limit_is_an_error(model):
-    result = simulate(compile_to_pad("MOVEJ JOINT(0, 80, 0, 0, 0, 0) SPEED 10\n"), model)
-    assert not result.ok
-    assert "J2=80.0°" in result.issues[0].message
-
-
-def test_unreachable_movel_is_an_error(model):
-    src = f"MOVEJ JOINT({', '.join(map(str, HOME))}) SPEED 50\nMOVEL WORLD(4000, 0, 1000, 0, 90, 0) SPEED 20\n"
-    result = simulate(compile_to_pad(src), model)
-    assert not result.ok
-    assert result.issues[0].where == "MAIN[4]"
-
-
-def test_movel_with_unknown_tool_or_frame_is_skipped_with_one_warning(model):
-    src = f"TOOL 2\nCOORD 1\nMOVEL {_world_of(model, HOME)} SPEED 20\nMOVEL {_world_of(model, HOME)} SPEED 20\n"
-    result = simulate(compile_to_pad(src), model)
-    assert result.ok
-    [issue] = result.issues
-    assert issue.message.startswith("2 MOVEL sin simular")
-    assert "herramienta 2" in issue.message and "coordenadas 1" in issue.message
+        m = mat_mul(model.fk(q), pose_matrix(*tool))
+        p = [m[i][3] for i in range(3)]
+        # distancia del punto a la recta a-b
+        ab = [b[i] - a[i] for i in range(3)]
+        ap = [p[i] - a[i] for i in range(3)]
+        t = sum(x * y for x, y in zip(ap, ab)) / sum(x * x for x in ab)
+        off = math.dist(p, [a[i] + ab[i] * t for i in range(3)])
+        assert off < 0.1
 
 
 def test_movel_puts_the_tool_tip_on_the_point_measured_in_the_frame(model):
-    from sim.kinematics import mat_mul
-    from sim.pad_sim import PadSimulator, invert
-
-    tool = [0, 0, 250, 0, 0, 0]           # torcha de 250 mm en el eje de la brida
-    frame = [800, -300, 200, 0, 0, 30]    # mesa girada 30° y desplazada
+    tool = [0, 0, 250, 0, 0, 0]
+    frame = [800, -300, 200, 0, 0, 30]
     sim = PadSimulator(model, tools={2: tool}, frames={1: frame})
-    # Punto en el sistema de la mesa, con la herramienta apuntando hacia abajo.
-    src = (f"MOVEJ JOINT({', '.join(map(str, HOME))}) SPEED 50\nTOOL 2\nCOORD 1\n"
-           "MOVEL WORLD(400, 300, 300, 180, 0, 0) SPEED 20\n")
-    result = sim.run(compile_to_pad(src))
+    src = f"MOVEJ {JHOME} SPEED 50\nTOOL 2\nCOORD 1\nMOVEL WORLD(400, 300, 300, 180, 0, 0) SPEED 20\n"
+    result = sim.run(_pad(src))
     assert result.ok, result.issues
     q = result.segments[-1].samples[-1]
     tip_in_world = mat_mul(model.fk(q), pose_matrix(*tool))
@@ -171,19 +205,93 @@ def test_movel_puts_the_tool_tip_on_the_point_measured_in_the_frame(model):
     assert sim.tcp(q, 2) == pytest.approx(tuple(tip_in_world[i][3] for i in range(3)))
 
 
+def test_joint_limit_is_an_error(model):
+    result = simulate(_pad("MOVEJ JOINT(0, 80, 0, 0, 0, 0) SPEED 10\n"), model)
+    assert not result.ok
+    assert "J2=80.0°" in result.issues[0].message
+
+
+def test_unreachable_movel_is_an_error_and_the_partial_path_is_kept(model):
+    src = f"MOVEJ {JHOME} SPEED 50\nMOVEL WORLD(4000, 0, 1000, 180, 0, 0) SPEED 20\n"
+    result = simulate(_pad(src), model)
+    assert not result.ok
+    assert result.issues[0].where == "MAIN[2]"
+    assert result.segments[-1].failed and result.skipped_moves == 1
+
+
+def test_one_failure_does_not_cascade(model):
+    reachable = _world_of(model, HOME, dz=-100)
+    src = (f"MOVEJ {JHOME} SPEED 50\nMOVEL WORLD(4000, 0, 1000, 180, 0, 0) SPEED 20\n"
+           + f"MOVEL {reachable} SPEED 20\n" * 3 + f"MOVEJ {JHOME} SPEED 50\n"
+           + f"MOVEL {reachable} SPEED 20\n")
+    result = simulate(_pad(src), model)
+    errors = [i for i in result.issues if i.severity == "error"]
+    assert len(errors) == 1                       # solo el MOVEL imposible
+    assert result.segments[-1].kind == "MOVEL" and not result.segments[-1].failed
+
+
+def test_unknown_tool_skips_with_one_warning_and_resumes_at_the_next_movej(model):
+    src = (f"MOVEJ {JHOME} SPEED 50\nTOOL 2\nCOORD 1\n"
+           f"MOVEL {_world_of(model, HOME)} SPEED 20\nMOVEL {_world_of(model, HOME)} SPEED 20\n"
+           f"TOOL 0\nCOORD 0\nMOVEL {_world_of(model, HOME, dz=-50)} SPEED 20\n"
+           f"MOVEJ {JHOME} SPEED 50\nMOVEL {_world_of(model, HOME, dz=-50)} SPEED 20\n")
+    result = simulate(_pad(src), model)
+    assert result.ok
+    assert result.missing_tools == [2] and result.missing_frames == [1]
+    assert result.skipped_moves == 3  # 2 sin marcos + 1 sin pose conocida
+    assert result.segments[-1].kind == "MOVEL"
+
+
 def test_unknown_actions_are_reported_once_per_code(model):
-    backup = compile_to_pad("WAIT 1s\n")
+    backup = _pad("WAIT 1s\n")
     backup.act.main[1:1] = [{"action": 53000, "insertedIndex": 90},
                             {"action": 53000, "insertedIndex": 91}]
     [issue] = simulate(backup, model).issues
     assert "53000" in issue.message and "2 vez" in issue.message
 
 
+def test_an_infinite_loop_is_simulated_once(model):
+    backup = _pad(f"MOVEJ {JHOME} SPEED 50\nMOVEJ JOINT(10, 45, -45, 0, -75, 0) SPEED 50\n")
+    main = backup.act.main
+    # etiqueta al principio y "si X010 OFF volver" al final: bucle con X010 apagada
+    main.insert(1, {"action": 59999, "comment": "Inicio", "flag": 0, "insertedIndex": 50})
+    main.insert(len(main) - 1, {"action": 10001, "flag": 0, "inout": 0, "insertedIndex": 51,
+                                "limit": "0.000", "point": 0, "pointStatus": 0, "type": 0})
+    result = simulate(backup, model)
+    assert not result.complete
+    assert any("bucle" in i.message for i in result.issues)
+    assert result.total_time_s < 10
+
+
+def test_progress_can_cancel(model):
+    src = f"MOVEJ {JHOME} SPEED 50\n" + "WAIT 1s\n" * 200
+
+    def cancel(_n):
+        raise Cancelled
+
+    with pytest.raises(Cancelled):
+        PadSimulator(model, progress=cancel).run(_pad(src))
+
+
+def test_segment_times_follow_the_joints(model):
+    src = f"MOVEJ {JHOME} SPEED 50\nMOVEJ JOINT(40, 45.894, -44.865, -0.792, -75.952, -0.859) SPEED 50\n"
+    seg = simulate(_pad(src), model).segments[-1]
+    assert seg.times[0] == 0 and seg.times[-1] == pytest.approx(seg.duration_s)
+    assert seg.duration_s == pytest.approx((40 - 0.347) / (190 * 0.5), rel=1e-6)
+
+
 def test_inputs_used_lists_the_inputs_the_program_reads():
     from sim.pad_sim import inputs_used
 
-    src = "PROC p()\nIF X013 == 1 THEN\nWAIT 1s\nENDIF\nENDPROC\nIF X012 == 1 THEN\np()\nENDIF\n"
+    src = "PROC p()\nIF X013 == 0 THEN\nWAIT 1s\nENDIF\nENDPROC\nIF X012 == 0 THEN\np()\nENDIF\n"
     assert inputs_used(compile_to_pad(src)) == [2, 3]
+
+
+def test_inputs_drive_the_if(model):
+    src = "PROC p()\nWAIT 1s\nENDPROC\nIF X012 == 1 THEN\np()\nENDIF\n"
+    backup = _pad(src)
+    assert simulate(backup, model, inputs={2: True}).total_time_s == pytest.approx(1)
+    assert simulate(backup, model, inputs={2: False}).total_time_s == 0
 
 
 def test_user_models_directory(tmp_path, monkeypatch):
@@ -192,18 +300,17 @@ def test_user_models_directory(tmp_path, monkeypatch):
     import sim.kinematics as kin
 
     data = json.loads((kin.MODELS_DIR / "BRTIRUS1820A.json").read_text(encoding="utf-8"))
-    data["name"] = "MiRobot"
+    data["name"] = "otro nombre adentro"  # manda el nombre del archivo
     (tmp_path / "MiRobot.json").write_text(json.dumps(data), encoding="utf-8")
+    (tmp_path / "Roto.json").write_text("{esto no es json", encoding="utf-8")
+    (tmp_path / "Incompleto.json").write_text('{"joints": []}', encoding="utf-8")
     monkeypatch.setattr(kin, "USER_MODELS_DIR", tmp_path)
     assert "MiRobot" in RobotModel.available()
-    assert RobotModel.load("MiRobot").a2 == 730
-
-
-def test_inputs_drive_the_if(model):
-    src = "PROC p()\nWAIT 1s\nENDPROC\nIF X012 == 1 THEN\np()\nENDIF\n"
-    backup = compile_to_pad(src)
-    assert simulate(backup, model, inputs={2: True}).total_time_s == pytest.approx(1)
-    assert simulate(backup, model, inputs={2: False}).total_time_s == 0
+    assert "Roto" not in RobotModel.available() and "Incompleto" not in RobotModel.available()
+    assert RobotModel.load("MiRobot").name == "MiRobot"
+    assert len(RobotModel.problems()) == 2
+    with pytest.raises(ValueError, match="Roto.json"):
+        RobotModel.load("Roto")
 
 
 def test_check_cli(tmp_path, capsys):

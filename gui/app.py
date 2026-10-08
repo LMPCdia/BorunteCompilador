@@ -157,7 +157,9 @@ def _self_test() -> int:
         from sim.pad_sim import simulate
 
         result = simulate(
-            compile_to_pad("MOVEJ JOINT(0, 45, -45, 0, -75, 0) SPEED 50\n"),
+            # El primer MOVEJ solo ubica al robot; el segundo es el que tarda.
+            compile_to_pad("MOVEJ JOINT(0, 45, -45, 0, -75, 0) SPEED 50\n"
+                           "MOVEJ JOINT(30, 45, -45, 0, -75, 0) SPEED 50\n"),
             RobotModel.load("BRTIRUS1820A"),
         )
         assert result.ok and result.total_time_s > 0, "la simulación no corrió"
@@ -203,9 +205,33 @@ def main() -> None:
     from gui.main_window import MainWindow
 
     app = QApplication(sys.argv)
+    install_error_dialog()
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
+
+
+def install_error_dialog() -> None:
+    """Cualquier excepción que se escape de un botón se muestra en una ventana.
+
+    En el .exe sin consola, una excepción no capturada en un slot de Qt no
+    deja rastro: el usuario ve que el botón "no hace nada". Con esto, por lo
+    menos ve qué pasó y lo puede reportar.
+    """
+    import traceback
+
+    from PySide6.QtWidgets import QMessageBox
+
+    def hook(exc_type, exc, tb):
+        detail = "".join(traceback.format_exception(exc_type, exc, tb))
+        _emit(detail)
+        box = QMessageBox(QMessageBox.Icon.Critical, "Borunte DSL — error inesperado",
+                          f"{exc_type.__name__}: {exc}\n\nLa aplicación sigue abierta, pero "
+                          f"conviene guardar el trabajo.")
+        box.setDetailedText(detail)
+        box.exec()
+
+    sys.excepthook = hook
 
 
 if __name__ == "__main__":

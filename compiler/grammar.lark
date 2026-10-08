@@ -43,8 +43,12 @@ world_literal: "WORLD" "(" number ("," number)~5 ")"
 joint_literal: "JOINT" "(" number ("," number)~5 ")"
 offset_expr: "OFFSET" "(" signed_number ("," signed_number)~5 ")"
 
-var_decl: "VAR" NAME ":" TYPE ("=" expr)? NEWLINE
-TYPE.2: "INT" | "REAL" | "BOOL"
+// Las palabras clave van como literales en reglas con "!" y NO como
+// terminales con prioridad (TYPE.2 etc.): con prioridad, el lexer cortaba
+// identificadores que EMPIEZAN con la palabra clave (`MOVEJ_HOME()` se leía
+// como MOVEJ + _HOME). Un literal solo gana si la palabra es exactamente esa.
+var_decl: "VAR" NAME ":" var_type ("=" expr)? NEWLINE
+!var_type: "INT" | "REAL" | "BOOL"
 
 timer_decl: "TIMER" NAME "=" number "s" NEWLINE
 
@@ -55,20 +59,20 @@ proc_body: (statement | blank_line)*
 
 assignment: NAME "=" expr NEWLINE
 
-move_stmt: MOVE_KIND point_expr "SPEED" number NEWLINE
-MOVE_KIND.2: "MOVEJ" | "MOVEL"
+move_stmt: move_kind point_expr "SPEED" number NEWLINE
+!move_kind: "MOVEJ" | "MOVEL"
 
 wait_in_stmt: "WAIT_IN" "(" NAME ("," number)? ")" NEWLINE
 wait_time_stmt: "WAIT" number "s" NEWLINE
               | "WAIT" "UNTIL" "MOVE_DONE" NEWLINE
 
-set_out_stmt: "SET_OUT" "(" NAME "," STATE ")" NEWLINE
+set_out_stmt: "SET_OUT" "(" NAME "," state ")" NEWLINE
 
 // Herramienta y sistema de coordenadas de los movimientos que siguen (los
 // números son los del pad). Ver compiler/pad_codegen.py.
 tool_stmt: "TOOL" number NEWLINE
 coord_stmt: "COORD" number NEWLINE
-STATE.2: "ON" | "OFF"
+!state: "ON" | "OFF"
 
 if_stmt: "IF" expr "THEN" NEWLINE then_block ("ELSE" NEWLINE else_block)? "ENDIF" NEWLINE
 then_block: (statement | blank_line)*

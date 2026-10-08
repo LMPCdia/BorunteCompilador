@@ -42,8 +42,9 @@ dato. Lo más importante:
 2. **La numeración de las E/S**: octal empezando en `010` (`Y034` = salida 20).
    Salió de solo 3 casos.
 3. **`WAIT`** (acción `100`) e **`IF` sobre entrada en OFF** (`pointStatus: 0`).
-4. **Herramienta y coordenadas**: se exporta todo con herramienta 0 y
-   coordenadas 0 salvo que se cambie en `PadOptions`.
+4. **Herramienta y coordenadas**: con `TOOL n` / `COORD n` en el programa; el
+   simulador necesita sus valores (copiados del pad) en las pestañas
+   Herramientas y Coordenadas.
 
 **Probá cada programa nuevo primero a velocidad baja.**
 
@@ -55,7 +56,14 @@ Para el pad, lo que no sabemos expresar es un error de compilación claro:
   del pad guarda ángulos de eje: mandarle X/Y/Z movería el robot a cualquier
   lado.
 - Sin `VAR`, asignaciones, `ELSE`, `WAIT_IN` ni `PROC` con parámetros.
-- `IF` solo pregunta por una entrada: `IF X010 == 1 THEN` o `== 0`.
+- `IF` solo pregunta por una entrada: `IF X010 == 0 THEN` (forma confirmada).
+  `IF X010 == 1` y llamar un PROC desde otro PROC nunca aparecieron en un
+  respaldo real: se exportan solo con **Programa → Permitir instrucciones sin
+  confirmar en el pad** (en la simulación se permiten siempre).
+- `TOOL n` / `COORD n` cambian la herramienta y el sistema de coordenadas de
+  los movimientos que siguen; cada PROC arranca de nuevo con 0/0.
+- Los errores dicen la línea; los avisos (lo que se descarta, como `WAIT
+  UNTIL MOVE_DONE`) aparecen al exportar.
 - Los offsets de puntos (`p + OFFSET(...)`) se resuelven al compilar.
 
 De la VM de referencia (solo simulación): `IF` solo con `==`, `PROC` sin pila

@@ -49,7 +49,21 @@ Vec = tuple[float, float, float]
 
 
 def mat_mul(a: Matrix, b: Matrix) -> Matrix:
-    return [[sum(a[i][k] * b[k][j] for k in range(4)) for j in range(4)] for i in range(4)]
+    """Producto de dos transformaciones rígidas (última fila 0 0 0 1).
+    Desenrollado: es el 60 % del tiempo de la cinemática inversa."""
+    a0, a1, a2 = a[0], a[1], a[2]
+    b0, b1, b2 = b[0], b[1], b[2]
+    out = []
+    for r in (a0, a1, a2):
+        x, y, z, w = r[0], r[1], r[2], r[3]
+        out.append([
+            x * b0[0] + y * b1[0] + z * b2[0],
+            x * b0[1] + y * b1[1] + z * b2[1],
+            x * b0[2] + y * b1[2] + z * b2[2],
+            x * b0[3] + y * b1[3] + z * b2[3] + w,
+        ])
+    out.append([0.0, 0.0, 0.0, 1.0])
+    return out
 
 
 def identity() -> Matrix:
@@ -111,21 +125,30 @@ def pose_error(current: Matrix, target: Matrix) -> list[float]:
     """Error (dx, dy, dz en mm; rx, ry, rz en rad) de `current` a `target`,
     en coordenadas del mundo."""
     dp = [target[i][3] - current[i][3] for i in range(3)]
-    # R_err = R_t · R_cᵀ, y su vector de rotación.
+    # R_err = R_t · R_cᵀ, y su vector de rotación (log de SO(3)).
     re = [[sum(target[i][k] * current[j][k] for k in range(3)) for j in range(3)] for i in range(3)]
-    cos_a = max(-1.0, min(1.0, (re[0][0] + re[1][1] + re[2][2] - 1) / 2))
-    angle = math.acos(cos_a)
     vec = [re[2][1] - re[1][2], re[0][2] - re[2][0], re[1][0] - re[0][1]]
-    if angle < 1e-9:
-        rot = [0.0, 0.0, 0.0]
-    elif math.pi - angle < 1e-6:
-        # cerca de 180°: el vector de arriba se anula; eje de la diagonal
-        axis = [math.sqrt(max(0.0, (re[i][i] + 1) / 2)) for i in range(3)]
-        rot = [a * angle for a in axis]
-    else:
-        k = angle / (2 * math.sin(angle))
-        rot = [k * c for c in vec]
-    return dp + rot
+    s = math.sqrt(vec[0] ** 2 + vec[1] ** 2 + vec[2] ** 2) / 2   # sin(ángulo)
+    c = (re[0][0] + re[1][1] + re[2][2] - 1) / 2                  # cos(ángulo)
+    angle = math.atan2(s, c)  # bien condicionado en todo el rango, a diferencia de acos
+    if angle < 1e-12:
+        return dp + [0.0, 0.0, 0.0]
+    if c > -0.99:
+        k = angle / (2 * s)
+        return dp + [k * x for x in vec]
+    # Cerca de 180°: el eje sale de la columna con mayor diagonal, con el
+    # signo que indica la parte antisimétrica (si no, se pierde el sentido).
+    i = max(range(3), key=lambda n: re[n][n])
+    axis = [0.0, 0.0, 0.0]
+    axis[i] = math.sqrt(max(0.0, (re[i][i] - c) / (1 - c)))
+    for j in range(3):
+        if j != i:
+            axis[j] = (re[i][j] + re[j][i]) / (2 * (1 - c) * axis[i])
+    n = math.sqrt(sum(a * a for a in axis))
+    axis = [a / n for a in axis]
+    if sum(a * v for a, v in zip(axis, vec)) < 0:
+        axis = [-a for a in axis]
+    return dp + [angle * a for a in axis]
 
 
 def solve_linear(a: list[list[float]], b: list[float]) -> list[float]:
@@ -171,21 +194,59 @@ class RobotModel:
 
     @classmethod
     def load(cls, name: str) -> "RobotModel":
-        data = json.loads(model_path(name).read_text(encoding="utf-8"))
-        g = data["geometry_mm"]
-        joints = tuple(
-            Joint(j["min_deg"], j["max_deg"], j["max_speed_dps"], j.get("sign", 1))
-            for j in data["joints"]
-        )
-        return cls(name=data["name"], joints=joints, reach_mm=data.get("reach_mm"),
-                   notes=data.get("notes", ""), **{k: g[k] for k in ("d1", "a1", "a2", "a3", "d4", "d6")})
+        """Carga `<name>.json`. El nombre del modelo es el del ARCHIVO (si el
+        JSON dice otro, manda el archivo: es lo que se busca después). Tira
+        ValueError con un mensaje claro si el JSON está roto o incompleto."""
+        path = model_path(name)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            g = data["geometry_mm"]
+            joints = tuple(
+                Joint(float(j["min_deg"]), float(j["max_deg"]), float(j["max_speed_dps"]),
+                      int(j.get("sign", 1)))
+                for j in data["joints"]
+            )
+            if len(joints) != 6:
+                raise ValueError(f"tiene {len(joints)} ejes y se esperaban 6")
+            if any(j.sign not in (1, -1) or j.min_deg >= j.max_deg or j.max_speed_dps <= 0
+                   for j in joints):
+                raise ValueError("algún eje tiene sign distinto de ±1, rango vacío o velocidad ≤ 0")
+            dims = {k: float(g[k]) for k in ("d1", "a1", "a2", "a3", "d4", "d6")}
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            raise ValueError(f"Modelo de robot {path.name} inválido: {e}") from None
+        return cls(name=path.stem, joints=joints, reach_mm=data.get("reach_mm"),
+                   notes=data.get("notes", ""), **dims)
 
     @staticmethod
-    def available() -> list[str]:
+    def _candidates() -> list[str]:
         names = {p.stem for p in MODELS_DIR.glob("*.json")}
         if USER_MODELS_DIR.is_dir():
             names |= {p.stem for p in USER_MODELS_DIR.glob("*.json")}
         return sorted(names)
+
+    @staticmethod
+    def available() -> list[str]:
+        """Modelos que se pueden cargar (los JSON rotos quedan afuera: ver
+        `problems()`)."""
+        ok = []
+        for name in RobotModel._candidates():
+            try:
+                RobotModel.load(name)
+            except ValueError:
+                continue
+            ok.append(name)
+        return ok
+
+    @staticmethod
+    def problems() -> list[str]:
+        """Mensajes de los JSON de modelos que no se pudieron cargar."""
+        out = []
+        for name in RobotModel._candidates():
+            try:
+                RobotModel.load(name)
+            except ValueError as e:
+                out.append(str(e))
+        return out
 
     # -- geometría en la posición cero ----------------------------------------------
 
@@ -288,6 +349,18 @@ class RobotModel:
             else:
                 return None
         return None
+
+    def wrap_into_limits(self, q_deg: list[float], seed_deg: list[float] | None = None) -> list[float]:
+        """Misma pose, con cada eje en la vuelta (±360°) que cae dentro de su
+        rango y, si hay varias, la más cercana a `seed_deg`. La cinemática
+        inversa no mira los rangos: sin esto daría "fuera de rango" falsos."""
+        seed = seed_deg or q_deg
+        out = []
+        for q, s, joint in zip(q_deg, seed, self.joints):
+            options = [q + k * 360 for k in range(-2, 3)]
+            inside = [v for v in options if joint.min_deg - 1e-6 <= v <= joint.max_deg + 1e-6]
+            out.append(min(inside or [q], key=lambda v: abs(v - s)))
+        return out
 
     def _jacobian(self, q: list[float], rot_weight: float) -> list[list[float]]:
         """Jacobiano exacto (por grado), en el mundo: cada eje gira alrededor de

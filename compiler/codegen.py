@@ -75,7 +75,19 @@ from runtime.bytecode import (
 
 
 class CompileError(Exception):
-    pass
+    """Error de compilación. `line` (1-based) cuando se sabe dónde está."""
+
+    def __init__(self, message: str, line: int | None = None) -> None:
+        super().__init__(message)
+        self.line = line
+
+
+def with_line(error: CompileError, stmt) -> CompileError:
+    """El mismo error, con "Línea N:" adelante si todavía no la tiene."""
+    line = getattr(stmt, "line", None)
+    if error.line is not None or line is None:
+        return error
+    return CompileError(f"Línea {line}: {error}", line=line)
 
 
 def _io_number(name: str) -> int:
@@ -209,6 +221,12 @@ class _Emitter:
     # -- emisión de sentencias ------------------------------------------------
 
     def emit_stmt(self, stmt) -> None:
+        try:
+            self._emit_stmt(stmt)
+        except CompileError as e:
+            raise with_line(e, stmt) from None
+
+    def _emit_stmt(self, stmt) -> None:
         if isinstance(stmt, PointDecl):
             self.register_point(self.resolve_point_expr(stmt.expr), name=stmt.name)
         elif isinstance(stmt, VarDecl):

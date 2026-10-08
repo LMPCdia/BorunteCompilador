@@ -45,7 +45,7 @@ from PySide6.QtWidgets import (
 
 from comms.robot_client import Pose
 from compiler.codegen import CompileError, compile_source
-from compiler.pad_codegen import PadOptions, compile_to_pad
+from compiler.pad_codegen import PadOptions, compile_to_pad_report
 from gui.connection_panel import ConnectionPanel
 from gui.message_window import MessageWindow
 from gui.project_tree import POSE_AXIS_NAMES, ProjectTree
@@ -58,18 +58,21 @@ from pad.listing import list_backup
 from runtime.bytecode import Program
 from runtime.plc_io_simulator import PlcIoSimulator
 
-EXAMPLE_PROGRAM = """; Programa de ejemplo — soldadura de una pieza
+EXAMPLE_PROGRAM = """; Programa de ejemplo: un cordón de soldadura de 300 mm
 ; MOVEJ va a puntos JOINT (ángulos de eje) y MOVEL a puntos WORLD (X,Y,Z,U,V,W).
 ; Las E/S se escriben como en el pad: X010, Y034, ...
-POINT p_home = JOINT(0.0, 45.0, -45.0, 0.0, -75.0, 0.0)
-POINT p_pieza = WORLD(100.0, 600.0, 200.0, 0.0, 0.0, 0.0)
+; TOOL n / COORD n eligen la herramienta y el sistema de coordenadas del pad.
+POINT p_home = JOINT(0.347, 45.894, -44.865, -0.792, -75.952, -0.859)
+POINT p_pieza = WORLD(1097.1, -150.0, 721.9, 180.0, -10.0, 180.0)
 
 PROC soldar_pieza()
 MOVEJ p_home SPEED 80
-MOVEL p_pieza SPEED 50
+MOVEL p_pieza + OFFSET(0, 0, 100, 0, 0, 0) SPEED 50
+MOVEL p_pieza SPEED 10
 SET_OUT(Y010, ON)
-WAIT 0.2s
+MOVEL p_pieza + OFFSET(0, 300, 0, 0, 0, 0) SPEED 5
 SET_OUT(Y010, OFF)
+MOVEL p_pieza + OFFSET(0, 300, 100, 0, 0, 0) SPEED 50
 MOVEJ p_home SPEED 80
 ENDPROC
 
@@ -105,6 +108,9 @@ class MainWindow(QMainWindow):
         self._connect_signals()
 
         self.messages.info("Listo. F7 para compilar.", "gui")
+        for severity, message in self._pending_reports:
+            self._sim_report(severity, message)
+        self._pending_reports = []
         self._apply_work_field("programacion")
         self._refresh_action_states()
 
@@ -138,7 +144,9 @@ class MainWindow(QMainWindow):
 
         # Simulación 3D del respaldo del pad (sim/). La vista 3D solo se crea
         # si hay OpenGL: ver gui/viewport3d.py.
-        self.sim_view = SimView(self.editor.toPlainText, report=self._sim_report)
+        self._pending_reports: list[tuple[str, str]] = []
+        self.sim_view = SimView(self.editor.toPlainText, report=self._sim_report,
+                                clear_reports=lambda: self.messages.clear_source("simulador"))
         self.tabs.addTab(self.sim_view, "Simulación 3D")
 
     def _build_points_tab(self) -> QWidget:
@@ -278,6 +286,12 @@ class MainWindow(QMainWindow):
         self.act_export_pad = QAction(self._icon(sp.SP_DriveFDIcon), "E&xportar para el pad…", self)
         self.act_export_pad.setShortcut(QKeySequence("Ctrl+E"))
 
+        # Apagado por defecto: lo que el respaldo real nunca mostró no va al
+        # robot salvo que se pida a propósito (ver compiler/pad_codegen.py).
+        self.act_allow_unverified = QAction("Permitir instrucciones sin confirmar en el pad", self)
+        self.act_allow_unverified.setCheckable(True)
+        self.act_allow_unverified.setChecked(False)
+
         self.act_digitize = QAction(self._icon(sp.SP_ArrowDown), "&Digitalizar punto", self)
         self.act_digitize.setShortcut(QKeySequence("F8"))
         self.act_digitize.setEnabled(False)
@@ -299,6 +313,7 @@ class MainWindow(QMainWindow):
         m_program.addAction(self.act_stop)
         m_program.addSeparator()
         m_program.addAction(self.act_export_pad)
+        m_program.addAction(self.act_allow_unverified)
 
         m_robot = bar.addMenu("&Robot")
         m_robot.addAction(self.act_digitize)
@@ -447,6 +462,9 @@ class MainWindow(QMainWindow):
             )
 
     def _sim_report(self, severity: str, message: str) -> None:
+        if not hasattr(self, "messages"):  # todavía construyendo la ventana
+            self._pending_reports.append((severity, message))
+            return
         {"info": self.messages.info, "warning": self.messages.warning,
          "error": self.messages.error}[severity](message, "simulador")
         if severity == "error":
@@ -466,8 +484,10 @@ class MainWindow(QMainWindow):
         """Compila para el pad y escribe el respaldo en `directory`. Devuelve la
         ruta, o None si no compiló (el error queda en la ventana de mensajes)."""
         source = self.editor.toPlainText()
+        options = PadOptions(program_name=self.pad_program_name(),
+                             allow_unverified=self.act_allow_unverified.isChecked())
         try:
-            backup = compile_to_pad(source, PadOptions(program_name=self.pad_program_name()))
+            backup, warnings = compile_to_pad_report(source, options)
         except CompileError as e:
             self.messages.error(f"No se puede exportar al pad: {e}", "pad")
             self._show_messages_dock()
@@ -477,7 +497,17 @@ class MainWindow(QMainWindow):
             self._show_messages_dock()
             return None
 
-        path = backup.write(directory)
+        try:
+            path = backup.write(directory)
+        except OSError as e:
+            self.messages.error(f"No se pudo escribir el respaldo en {directory}: {e}", "pad")
+            self._show_messages_dock()
+            return None
+        for warning in warnings:
+            self.messages.warning(warning, "pad")
+        if options.allow_unverified:
+            self.messages.warning("Exportado CON instrucciones sin confirmar habilitadas: "
+                                  "probalo primero a velocidad baja.", "pad")
         self.pad_view.setPlainText("\n".join(list_backup(backup)))
         self.tabs.setCurrentWidget(self.pad_view)
         self.messages.info(

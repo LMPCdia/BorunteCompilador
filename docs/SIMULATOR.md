@@ -82,7 +82,7 @@ plano).
 | Medidas `d1, a1, a2, a3, d4, d6` del 1820A | **Verificado contra el plano** | Alcance 170 + 730 + √(825.5² + 100²) = 1731.53 (cota 1731.5) y altura 494.6 + 730 + 831.53 = 2056.1 (cota 2056) |
 | Rangos y velocidades | Tabla del fabricante | La tabla enviada no dice el modelo: confirmar que es la del 1820A |
 | Cero de cada eje = pose del plano | Hipótesis | — |
-| J2 positivo = hacia adelante; J3 positivo = antebrazo hacia abajo | Hipótesis | El HOME de un programa real (J2 = 45.9°, J3 = -44.9°) da brazo inclinado y antebrazo horizontal, la pose típica |
+| J2 y J3 invertidos (`sign: -1`: J2 positivo = brazo hacia atrás) | Deducido | De los 25 MOVEJ de un respaldo real: con esta elección el HOME queda recogido (brida en 509, 1, 969) en vez de casi estirado, las poses "Safty" de las 3 filas quedan a la misma altura sobre las mesas con la torcha hacia abajo, y el único MOVEL en coordenadas del mundo queda a ~110 mm del MOVEJ vecino (con la otra elección, a ~1180 mm). También acerca la zona de trabajo a las cotas del plano |
 | J5 invertido (`sign: -1`) | Deducido | Con ese HOME (J5 = -76°) la herramienta queda **hacia abajo**; con el otro sentido apuntaría hacia arriba. Un foro de RoboDK también reporta ejes 4-6 invertidos en Borunte |
 | J4, J6 | Sin evidencia | Se dejan en `sign: 1` |
 | Convención U, V, W | Hipótesis | `R = Rz(W) · Ry(V) · Rx(U)` (ángulos fijos X-Y-Z) |
@@ -94,13 +94,37 @@ la pantalla del pad, los ángulos J1-J6 y la posición X, Y, Z, U, V, W
 (herramienta 0, coordenadas 0). Si `fk(ángulos)` da esa posición, el modelo
 está bien; si no, la diferencia dice qué eje está invertido o desfasado.
 
+## Cómo se comporta (decisiones de la revisión con 3 agentes, octubre 2026)
+
+- **MOVEL = recta de la PUNTA** de la herramienta (no de la brida), con la
+  orientación interpolada por el camino más corto.
+- **Pose inicial desconocida:** el robot aparece en el primer MOVEJ, sin
+  tiempo ni trayectoria. Un MOVEL antes de cualquier MOVEJ no se evalúa.
+- **Sin errores en cadena:** si un MOVEL falla, se dibuja en rojo hasta donde
+  llegó y el robot sigue desde el destino (si alguna configuración llega);
+  si no, los MOVEL siguientes quedan "sin evaluar" hasta el próximo MOVEJ.
+  Lo mismo pasa con los MOVEL salteados por falta de herramienta o sistema.
+- **Bucles:** con las entradas fijas, volver a la misma etiqueta con el
+  robot en la misma pose es un bucle infinito seguro: se simula una vuelta
+  y se informa. Además hay un tope de 20 000 acciones y se puede cancelar.
+- **Ejes:** dentro de una recta manda la continuidad (si J4 pasa de 180° es
+  un error real, con el valor y el rango en el mensaje). En los puntos
+  sueltos se elige la vuelta de cada eje que cae en su rango.
+- **Tiempo:** por eje, al % de su velocidad máxima; cada muestra guarda su
+  tiempo real (cerca de una singularidad la animación se frena donde el
+  robot se frenaría).
+
 ## Limitaciones
 
-- Los `MOVEL` con herramienta o coordenadas distintas de 0 se saltean (hace
-  falta cargar esos marcos del pad).
+- Los `MOVEL` con una herramienta o un sistema de coordenadas que no se
+  cargó en la pestaña se saltean (un solo aviso, y el botón "Cargar las que
+  faltan" agrega las filas).
 - Sin detección de colisiones todavía: el layout se ve, pero no se chequea
   contra el robot.
 - La vista 3D necesita OpenGL. Sin él (máquinas virtuales, escritorio
   remoto viejo) la pestaña muestra un aviso y la simulación funciona igual.
 - `WAIT_IN` no existe en el pad todavía; los `IF` usan los estados de entrada
-  que se pasan con `--input`.
+  de las casillas (o `--input` en la línea de comandos), fijos toda la
+  simulación.
+- Sin velocidad lineal máxima del robot: el tiempo de un MOVEL rápido puede
+  salir corto.

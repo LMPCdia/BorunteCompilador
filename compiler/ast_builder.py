@@ -7,10 +7,17 @@ es seguro de hacer bottom-up porque no dependemos de saber PCs todavía.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
-from lark import Lark, Token, Transformer
-from lark.exceptions import VisitError
+from lark import Lark, Token, Transformer, v_args
+from lark.exceptions import (
+    UnexpectedCharacters,
+    UnexpectedEOF,
+    UnexpectedInput,
+    UnexpectedToken,
+    VisitError,
+)
 
 from comms.robot_client import Pose
 from compiler.ast_nodes import (
@@ -45,7 +52,7 @@ def _strip_newline(args: list) -> list:
 
 def _whole_number(value, keyword: str) -> int:
     number = float(value)
-    if number != int(number) or not 0 <= number <= 65535:
+    if not math.isfinite(number) or number != int(number) or not 0 <= number <= 65535:
         from compiler.codegen import CompileError
 
         raise CompileError(f"{keyword} {value}: tiene que ser un número entero entre 0 y 65535")
@@ -148,6 +155,15 @@ class _AstBuilder(Transformer):
         name, expr = args
         return Assignment(str(name), self._to_expr(expr))
 
+    def move_kind(self, args):
+        return str(args[0])
+
+    def var_type(self, args):
+        return str(args[0])
+
+    def state(self, args):
+        return str(args[0])
+
     def move_stmt(self, args):
         args = _strip_newline(args)
         kind, point, speed = args
@@ -222,21 +238,55 @@ class _AstBuilder(Transformer):
     def start(self, args):
         return SourceProgram(self._stmt_list(args))
 
-    def statement(self, args):
-        (stmt,) = args
+    @v_args(meta=True)
+    def statement(self, meta, children):
+        (stmt,) = children
+        # Línea de la sentencia, para los mensajes de error (no es parte del
+        # AST "de verdad": los nodos no la declaran como campo).
+        stmt.line = getattr(meta, "line", None)
         return stmt
+
+
+# Cómo se llaman, para el usuario, los terminales que Lark pone en "se esperaba".
+_TOKEN_NAMES = {
+    "NEWLINE": "fin de línea", "LPAR": "«(»", "RPAR": "«)»", "COMMA": "«,»",
+    "EQUAL": "«=»", "COLON": "«:»", "PLUS": "«+»", "MINUS": "«-»",
+    "NAME": "un nombre", "SIGNED_NUMBER": "un número", "$END": "fin del archivo",
+}
+
+
+def _syntax_message(e: UnexpectedInput, source: str) -> str:
+    line = getattr(e, "line", None)
+    text = source.splitlines()[line - 1].strip() if line and line <= len(source.splitlines()) else ""
+    where = f"Línea {line}" if line else "Error de sintaxis"
+    if isinstance(e, UnexpectedEOF) or (isinstance(e, UnexpectedToken) and e.token.type == "$END"):
+        return "El programa termina antes de tiempo: ¿falta un ENDIF o un ENDPROC?"
+    if isinstance(e, UnexpectedCharacters):
+        return f"{where}: carácter inesperado «{e.char}» en «{text}»"
+    if isinstance(e, UnexpectedToken):
+        found = "fin de línea" if e.token.type == "NEWLINE" else f"«{e.token}»"
+        expected = sorted({_TOKEN_NAMES.get(t, f"«{t}»") for t in e.expected
+                           if not t.startswith("__")})[:6]
+        hint = f" Se esperaba: {', '.join(expected)}." if expected else ""
+        return f"{where}: no se esperaba {found} en «{text}».{hint}"
+    return f"{where}: error de sintaxis en «{text}»"
 
 
 def build_ast(source: str) -> SourceProgram:
     grammar_text = GRAMMAR_PATH.read_text(encoding="utf-8")
-    parser = Lark(grammar_text, parser="lalr")
+    parser = Lark(grammar_text, parser="lalr", propagate_positions=True)
     # Toda sentencia de la gramática termina en NEWLINE, así que un archivo sin
     # salto de línea final moría con "Unexpected token $END". Es exactamente lo
     # que pasa escribiendo en el editor de la GUI sin apretar Enter al final,
     # así que se tolera acá en vez de hacérselo notar al usuario.
     if source and not source.endswith("\n"):
         source += "\n"
-    tree = parser.parse(source)
+    try:
+        tree = parser.parse(source)
+    except UnexpectedInput as e:
+        from compiler.codegen import CompileError
+
+        raise CompileError(_syntax_message(e, source), line=getattr(e, "line", None)) from None
     try:
         return _AstBuilder().transform(tree)
     except VisitError as e:

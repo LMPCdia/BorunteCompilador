@@ -9,21 +9,31 @@ docs/SIMULATOR.md):
 
 - MOVEJ interpola en ejes; cada eje va a `speed`% de su velocidad máxima y
   todos llegan juntos (el más lento manda).
-- MOVEL interpola en línea recta en el espacio cartesiano, con la misma regla
-  de velocidad aplicada a cada tramo (no conocemos la velocidad lineal máxima).
+- MOVEL lleva la PUNTA de la herramienta en línea recta (posición y
+  orientación interpoladas), con la misma regla de velocidad por tramo.
 - Herramientas y sistemas de coordenadas: los valores se cargan a mano (del
-  pad) en `tools` y `frames`, como X, Y, Z, U, V, W. Un MOVEL apunta la PUNTA
+  pad) en `tools` y `frames`, como X, Y, Z, U, V, W. Un MOVEL apunta la punta
   de la herramienta t a la pose P medida en el sistema c:
       brida = frame[c] · P · tool[t]⁻¹
   (hipótesis: misma convención U/V/W que las poses). La herramienta 0 es la
-  brida y el sistema 0 la base. Los MOVEL con una herramienta o un sistema
-  que no se cargó se saltean y se reportan juntos, en un solo aviso.
+  brida y el sistema 0 la base.
+- La pose inicial NO se conoce: el robot "aparece" en el primer MOVEJ (sin
+  tiempo ni trayectoria). Un MOVEL antes de cualquier MOVEJ no se puede
+  evaluar.
+- Si un movimiento falla o no se puede simular, el robot sigue desde el
+  destino (si se encuentra una configuración que llegue); si no, los MOVEL
+  siguientes quedan sin evaluar hasta el próximo MOVEJ, en vez de dar una
+  cascada de errores falsos.
+- Las entradas son fijas durante toda la simulación: volver a la misma
+  etiqueta con el robot en la misma pose es un bucle infinito seguro. Se
+  simula UNA vuelta y se informa.
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from typing import Callable
 
 from pad.backup import Action, PadBackup
 from sim.kinematics import Matrix, RobotModel, identity, mat_mul, pose_error, pose_matrix, rot_axis
@@ -36,8 +46,14 @@ COMMENT, LABEL, END = 50000, 59999, 60000
 # Saltos de un eje entre dos muestras de un MOVEL que delatan una
 # singularidad (la muñeca "da la vuelta").
 JUMP_THRESHOLD_DEG = 20.0
+WRIST_SINGULAR_DEG = 5.0
 LINEAR_STEP_MM = 25.0
 LINEAR_STEP_DEG = 5.0
+# Presupuestos: un programa que no los respeta se corta con un aviso, nunca
+# deja la interfaz colgada.
+MAX_ACTIONS = 20_000
+MAX_CALL_DEPTH = 20
+PROGRESS_EVERY = 50  # acciones entre llamadas a `progress`
 
 Pose6 = list[float] | tuple[float, ...]  # X, Y, Z (mm), U, V, W (grados)
 
@@ -47,14 +63,14 @@ def invert(m: Matrix) -> Matrix:
     rt = [[m[j][i] for j in range(3)] for i in range(3)]
     t = [-sum(rt[i][k] * m[k][3] for k in range(3)) for i in range(3)]
     return [rt[0] + [t[0]], rt[1] + [t[1]], rt[2] + [t[2]], [0.0, 0.0, 0.0, 1.0]]
-MAX_ACTIONS = 100_000
 
 
 @dataclass
 class Issue:
-    severity: str  # "error" | "aviso"
+    severity: str  # "error" | "aviso" | "info"
     where: str     # "MAIN[12]" = programa y insertedIndex
     message: str
+    time_s: float | None = None  # instante de la simulación, para saltar ahí
 
 
 @dataclass
@@ -65,6 +81,8 @@ class Segment:
     duration_s: float
     name: str = ""
     tool: int = 0                  # herramienta con la que se dibuja la punta
+    times: list[float] = field(default_factory=list)  # tiempo de cada muestra, desde 0
+    failed: bool = False           # tramo hasta donde se llegó antes de un error
 
 
 @dataclass
@@ -73,6 +91,12 @@ class SimResult:
     segments: list[Segment] = field(default_factory=list)
     issues: list[Issue] = field(default_factory=list)
     outputs: list[tuple[float, int, bool]] = field(default_factory=list)  # (t, salida, estado)
+    total_moves: int = 0            # MOVEJ + MOVEL que el programa ejecutó
+    skipped_moves: int = 0          # de esos, cuántos no se pudieron simular
+    complete: bool = True           # False si se cortó (bucle, presupuesto, cancelado)
+    start_deg: list[float] | None = None
+    missing_tools: list[int] = field(default_factory=list)   # herramientas sin cargar
+    missing_frames: list[int] = field(default_factory=list)  # sistemas sin cargar
 
     @property
     def total_time_s(self) -> float:
@@ -81,6 +105,14 @@ class SimResult:
     @property
     def ok(self) -> bool:
         return not any(i.severity == "error" for i in self.issues)
+
+
+class Cancelled(Exception):
+    """La interfaz pidió cortar la simulación."""
+
+
+class _Stop(Exception):
+    """Fin de la simulación antes de tiempo (bucle, presupuesto, error fatal)."""
 
 
 def _interp_rotation(r0: Matrix, r1: Matrix, t: float) -> list[list[float]]:
@@ -98,35 +130,35 @@ class PadSimulator:
     def __init__(self, model: RobotModel, inputs: dict[int, bool] | None = None,
                  start_deg: list[float] | None = None,
                  tools: dict[int, Pose6] | None = None,
-                 frames: dict[int, Pose6] | None = None) -> None:
+                 frames: dict[int, Pose6] | None = None,
+                 progress: Callable[[int], None] | None = None) -> None:
         self.model = model
         self.inputs = inputs or {}
-        self.q = list(start_deg or [0.0] * 6)
+        # None = no se sabe dónde está el robot (hasta el primer MOVEJ).
+        self.q: list[float] | None = list(start_deg) if start_deg else None
         self.tools = {0: identity(), **{int(k): pose_matrix(*v) for k, v in (tools or {}).items()}}
         self.frames = {0: identity(), **{int(k): pose_matrix(*v) for k, v in (frames or {}).items()}}
-        self._skipped = 0
+        self.progress = progress
+        self._actions = 0
         self._missing_tools: set[int] = set()
         self._missing_frames: set[int] = set()
         self._unknown: dict[int, list[str]] = {}
+        self._unevaluated: list[str] = []      # MOVEL sin evaluar por pose desconocida
+        self._lost_reason = "no se conoce la pose inicial (el programa no empieza con MOVEJ)"
+        self._seen_jumps: set = set()
+        self._last_known: list[float] = list(self.q) if self.q else [0.0] * 6  # para dibujar
+
+    # -- API -------------------------------------------------------------------
 
     def run(self, backup: PadBackup) -> SimResult:
         result = SimResult(model=self.model.name)
+        self._result = result
         modules = {m.id: m for m in backup.act.modules}
-        self._run_program("MAIN", backup.act.main, modules, result, depth=0)
-        if self._skipped:
-            missing = []
-            if self._missing_tools:
-                missing.append("herramienta " + ", ".join(map(str, sorted(self._missing_tools))))
-            if self._missing_frames:
-                missing.append("coordenadas " + ", ".join(map(str, sorted(self._missing_frames))))
-            result.issues.append(Issue(
-                "aviso", "programa",
-                f"{self._skipped} MOVEL sin simular: falta cargar {' y '.join(missing)} "
-                f"(valores del pad, en la pestaña Simulación 3D)."))
-        for code, wheres in self._unknown.items():
-            result.issues.append(Issue(
-                "aviso", wheres[0],
-                f"Acción {code} desconocida ({len(wheres)} vez/veces): no se simula"))
+        try:
+            self._run_program("MAIN", backup.act.main, modules, depth=0, stack=())
+        except _Stop:
+            result.complete = False
+        self._summarize()
         return result
 
     def tcp(self, q: list[float], tool: int = 0) -> tuple[float, float, float]:
@@ -134,141 +166,259 @@ class PadSimulator:
         m = mat_mul(self.model.fk(q), self.tools.get(tool, identity()))
         return (m[0][3], m[1][3], m[2][3])
 
+    # -- avisos -----------------------------------------------------------------
+
+    def _issue(self, severity: str, where: str, message: str) -> None:
+        self._result.issues.append(Issue(severity, where, message, self._result.total_time_s))
+
+    def _summarize(self) -> None:
+        r = self._result
+        r.missing_tools = sorted(self._missing_tools)
+        r.missing_frames = sorted(self._missing_frames)
+        missing = []
+        if self._missing_tools:
+            missing.append("herramienta " + ", ".join(map(str, sorted(self._missing_tools))))
+        if self._missing_frames:
+            missing.append("coordenadas " + ", ".join(map(str, sorted(self._missing_frames))))
+        if missing:
+            r.issues.append(Issue(
+                "aviso", "programa",
+                f"Falta cargar {' y '.join(missing)} (valores del pad, pestañas Herramientas y "
+                f"Coordenadas): los MOVEL que las usan no se simularon."))
+        if self._unevaluated:
+            r.issues.append(Issue(
+                "aviso", self._unevaluated[0],
+                f"{len(self._unevaluated)} MOVEL sin evaluar porque no se sabía dónde estaba el "
+                f"robot (el primero en {self._unevaluated[0]}). Se retoma en el próximo MOVEJ."))
+        for code, wheres in self._unknown.items():
+            r.issues.append(Issue(
+                "aviso", wheres[0], f"Acción {code} desconocida ({len(wheres)} vez/veces): no se simula"))
+
     # -- intérprete -----------------------------------------------------------------
 
-    def _run_program(self, name: str, actions: list[Action], modules, result: SimResult,
-                     depth: int) -> int | None:
-        """Ejecuta un programa. Devuelve el `flag` al que hay que saltar al
-        volver (CALL con salto), o None."""
-        if depth > 20:
-            result.issues.append(Issue("error", name, "Más de 20 llamadas anidadas"))
-            return None
+    def _tick(self, where: str) -> None:
+        self._actions += 1
+        if self._actions > MAX_ACTIONS:
+            self._issue("aviso", where, f"Se cortó la simulación después de {MAX_ACTIONS} "
+                                        f"acciones: el programa es demasiado largo o repite mucho.")
+            raise _Stop
+        if self.progress is not None and self._actions % PROGRESS_EVERY == 0:
+            self.progress(self._actions)  # puede tirar Cancelled
+
+    def _goto(self, name: str, flag: int, labels: dict, where: str, stack: tuple) -> int:
+        """PC de la etiqueta `flag`, cortando si es un bucle infinito."""
+        if flag not in labels:
+            self._issue("error", where, f"Salto a la etiqueta {flag}, que no existe en {name}")
+            raise _Stop
+        pc = labels[flag]
+        key = (stack, name, pc, None if self.q is None else tuple(round(v, 3) for v in self.q))
+        if key in self._seen_jumps:
+            self._issue("info", where,
+                        f"El programa vuelve a la etiqueta {flag} en la misma situación: es un "
+                        f"bucle (se repite indefinidamente con estas entradas). Se simuló una "
+                        f"vuelta.")
+            raise _Stop
+        self._seen_jumps.add(key)
+        return pc
+
+    def _run_program(self, name: str, actions: list[Action], modules, depth: int,
+                     stack: tuple) -> None:
+        if depth > MAX_CALL_DEPTH:
+            self._issue("error", name, f"Más de {MAX_CALL_DEPTH} llamadas anidadas (¿recursión?)")
+            raise _Stop
         labels = {a["flag"]: i for i, a in enumerate(actions) if a["action"] == LABEL}
-        pc, executed = 0, 0
+        pc = 0
         while pc < len(actions):
-            executed += 1
-            if executed > MAX_ACTIONS:
-                result.issues.append(Issue("error", name, "Posible bucle infinito"))
-                return None
             action = actions[pc]
             code = action["action"]
             where = f"{name}[{action.get('insertedIndex', '?')}]"
+            self._tick(where)
             pc += 1
             if code in (MOVEJ, MOVEL):
-                self._move(action, where, result)
+                self._move(action, where)
             elif code == WAIT:
-                result.segments.append(
-                    Segment("WAIT", where, [list(self.q)], float(action.get("limit", 0))))
+                self._wait(action, where)
             elif code == SET_OUT:
-                result.outputs.append((result.total_time_s, action["point"], bool(action["pointStatus"])))
+                self._result.outputs.append(
+                    (self._result.total_time_s, action["point"], bool(action["pointStatus"])))
             elif code == IF_INPUT_GOTO:
                 state = self.inputs.get(action["point"], False)
                 if state == bool(action["pointStatus"]):
-                    if action["flag"] not in labels:
-                        result.issues.append(Issue("error", where, f"Etiqueta {action['flag']} inexistente"))
-                        return None
-                    pc = labels[action["flag"]]
+                    pc = self._goto(name, action["flag"], labels, where, stack)
             elif code == CALL:
                 module = modules.get(int(action["module"]))
                 if module is None:
-                    result.issues.append(Issue("error", where, f"Módulo {action['module']} inexistente"))
+                    self._issue("error", where, f"Llamada al módulo {action['module']}, que no existe")
                     continue
-                self._run_program(module.name, module.actions, modules, result, depth + 1)
+                self._run_program(module.name, module.actions, modules, depth + 1,
+                                  stack + ((name, pc),))
                 # Hipótesis (docs/PAD_FORMAT.md): flag != -1 = saltar al volver.
                 if action["flag"] != -1:
                     flag = int(action["flag"])
                     if flag in labels:
-                        pc = labels[flag]
+                        pc = self._goto(name, flag, labels, where, stack)
+                    else:
+                        self._issue("aviso", where, f"La llamada salta a la etiqueta {flag}, "
+                                                    f"que no existe: se sigue de largo")
             elif code in (RETURN, END):
-                return None
+                return
             elif code in (COMMENT, LABEL, SET_COORD, SET_TOOL):
                 pass
             else:
                 self._unknown.setdefault(code, []).append(where)
-        return None
+
+    def _wait(self, action: Action, where: str) -> None:
+        seconds = float(action.get("limit", 0))
+        if action.get("isUnlimit"):
+            self._issue("aviso", where, "WAIT sin límite de tiempo: se simula como 0 s")
+            seconds = 0.0
+        if seconds < 0:
+            self._issue("aviso", where, f"WAIT negativo ({seconds}): se simula como 0 s")
+            seconds = 0.0
+        q = list(self.q) if self.q is not None else list(self._last_known)
+        self._result.segments.append(Segment("WAIT", where, [q], seconds, times=[0.0]))
 
     # -- movimientos ------------------------------------------------------------------
 
-    def _move(self, action: Action, where: str, result: SimResult) -> None:
+    def _move(self, action: Action, where: str) -> None:
+        r = self._result
+        r.total_moves += 1
         pos = action["points"][0]["pos"]
         values = [float(pos[f"m{i}"]) for i in range(6)]
         speed = float(action.get("speed", 100)) / 100.0
+        if speed <= 0:
+            self._issue("aviso", where, "SPEED 0: se simula al 1 %")
+            speed = 0.01
         name = action.get("customName", "")
         tool_coord = int(action.get("toolCoord", 0))
         tool, coord = tool_coord >> 16, tool_coord & 0xFFFF
+        if action.get("relativeType", 0) != 0:
+            self._issue("aviso", where, "Movimiento relativo (relativeType): se simula como "
+                                        "absoluto, puede no coincidir con el robot")
 
         if action["action"] == MOVEJ:
             target = values
             bad = self.model.out_of_limits(target)
             if bad:
                 ejes = ", ".join(f"J{i + 1}={target[i]:.1f}°" for i in bad)
-                result.issues.append(Issue("error", where, f"MOVEJ fuera de rango: {ejes}"))
-            samples = self._joint_path(self.q, target)
-            result.segments.append(Segment("MOVEJ", where, samples, self._duration(samples, speed),
-                                           name, tool if tool in self.tools else 0))
-            self.q = target
+                self._issue("error", where, f"MOVEJ fuera de rango: {ejes}")
+            if self.q is None:
+                # Primer MOVEJ: el robot se ubica ahí (no se sabe de dónde viene).
+                r.start_deg = list(target)
+                r.segments.append(Segment("MOVEJ", where, [list(target)], 0.0, name,
+                                          tool if tool in self.tools else 0, [0.0]))
+            else:
+                samples = self._joint_path(self.q, target)
+                times = self._times(samples, speed)
+                r.segments.append(Segment("MOVEJ", where, samples, times[-1], name,
+                                          tool if tool in self.tools else 0, times))
+            self.q = list(target)
+            self._last_known = list(target)
             return
 
-        if tool not in self.tools or coord not in self.frames:
-            self._skipped += 1
-            if tool not in self.tools:
-                self._missing_tools.add(tool)
-            if coord not in self.frames:
-                self._missing_frames.add(coord)
+        # MOVEL
+        missing = False
+        if tool not in self.tools:
+            self._missing_tools.add(tool)
+            missing = True
+        if coord not in self.frames:
+            self._missing_frames.add(coord)
+            missing = True
+        if missing:
+            r.skipped_moves += 1
+            self._lose(f"un MOVEL sin herramienta/coordenadas cargadas ({where})")
             return
-        target_m = mat_mul(mat_mul(self.frames[coord], pose_matrix(*values)), invert(self.tools[tool]))
-        samples = self._linear_path(target_m, where, result)
-        if samples is None:
+        if self.q is None:
+            r.skipped_moves += 1
+            self._unevaluated.append(where)
             return
-        result.segments.append(Segment("MOVEL", where, samples, self._duration(samples, speed),
-                                       name, tool))
-        self.q = samples[-1]
+        target_tcp = mat_mul(self.frames[coord], pose_matrix(*values))
+        samples, failed = self._linear_path(target_tcp, self.tools[tool], where)
+        times = self._times(samples, speed)
+        r.segments.append(Segment("MOVEL", where, samples, times[-1], name, tool, times, failed))
+        if failed:
+            r.skipped_moves += 1
+            self._recover(mat_mul(target_tcp, invert(self.tools[tool])), where)
+        else:
+            self.q = samples[-1]
+        self._last_known = list(samples[-1])
+
+    def _lose(self, reason: str) -> None:
+        self.q = None
+        self._lost_reason = reason
+
+    def _recover(self, target_flange: Matrix, where: str) -> None:
+        """Después de un MOVEL fallido: seguir desde el destino si alguna
+        configuración llega, para no encadenar errores falsos."""
+        seeds = [self.q] + [
+            [s[0], s[1], s[2], s[3] + d4, s[4] * k, s[5] + d6]
+            for s in [self.q] for d4, d6, k in ((180, 180, -1), (-180, -180, -1), (90, 0, 1), (-90, 0, 1))
+        ]
+        for seed in seeds:
+            q = self.model.ik(target_flange, seed)
+            if q is not None:
+                q = self.model.wrap_into_limits(q, seed)
+                if not self.model.out_of_limits(q):
+                    self.q = q
+                    self._last_known = list(q)
+                    self._issue("info", where, "Se sigue simulando desde el destino de este "
+                                               "MOVEL (con otra configuración del brazo).")
+                    return
+        self._lose(f"el MOVEL fallido en {where}")
 
     def _joint_path(self, q0: list[float], q1: list[float]) -> list[list[float]]:
         n = max(2, int(max(abs(b - a) for a, b in zip(q0, q1)) / 2) + 1)
         return [[a + (b - a) * i / (n - 1) for a, b in zip(q0, q1)] for i in range(n)]
 
-    def _linear_path(self, target: Matrix, where: str, result: SimResult) -> list[list[float]] | None:
-        start = self.model.fk(self.q)
-        dist = math.dist([start[i][3] for i in range(3)], [target[i][3] for i in range(3)])
-        rot = math.sqrt(sum(e * e for e in pose_error(start, target)[3:]))
+    def _linear_path(self, target_tcp: Matrix, tool: Matrix, where: str) -> tuple[list[list[float]], bool]:
+        """Recta de la PUNTA. Devuelve las muestras hasta donde se llegó y si falló."""
+        tool_inv = invert(tool)
+        start = mat_mul(self.model.fk(self.q), tool)
+        dist = math.dist([start[i][3] for i in range(3)], [target_tcp[i][3] for i in range(3)])
+        rot = math.sqrt(sum(e * e for e in pose_error(start, target_tcp)[3:]))
         n = max(2, int(max(dist / LINEAR_STEP_MM, math.degrees(rot) / LINEAR_STEP_DEG)) + 1)
         q, samples = list(self.q), [list(self.q)]
+        worst_jump, jump_at = 0.0, 0.0
         for i in range(1, n):
             t = i / (n - 1)
-            r = _interp_rotation(start, target, t)
-            p = [start[k][3] + (target[k][3] - start[k][3]) * t for k in range(3)]
-            m = [r[0] + [p[0]], r[1] + [p[1]], r[2] + [p[2]], [0.0, 0.0, 0.0, 1.0]]
-            nq = self.model.ik(m, q)
+            r = _interp_rotation(start, target_tcp, t)
+            p = [start[k][3] + (target_tcp[k][3] - start[k][3]) * t for k in range(3)]
+            tcp = [r[0] + [p[0]], r[1] + [p[1]], r[2] + [p[2]], [0.0, 0.0, 0.0, 1.0]]
+            nq = self.model.ik(mat_mul(tcp, tool_inv), q)
             if nq is None:
-                result.issues.append(Issue(
-                    "error", where,
-                    f"MOVEL inalcanzable al {t:.0%} del recorrido (fuera de alcance o "
-                    f"singularidad)"))
-                return None
+                if abs(q[4]) < WRIST_SINGULAR_DEG:
+                    why = (f"singularidad de muñeca (J5 ≈ {q[4]:.1f}°): J4 y J6 tendrían que "
+                           f"girar de golpe")
+                else:
+                    why = "fuera de alcance, o la recta pasa por donde el brazo no llega"
+                self._issue("error", where, f"MOVEL inalcanzable al {t:.0%} del recorrido: {why}")
+                return samples, True
+            # Sin "acomodar la vuelta" (wrap_into_limits): dentro de una recta
+            # manda la continuidad, y si un eje pasa su límite es real.
             jump = max(abs(a - b) for a, b in zip(nq, q))
-            if jump > JUMP_THRESHOLD_DEG:
-                result.issues.append(Issue(
-                    "aviso", where,
-                    f"Salto de {jump:.0f}° en un eje al {t:.0%} del MOVEL: probable "
-                    f"singularidad de muñeca"))
+            if jump > worst_jump:
+                worst_jump, jump_at = jump, t
             bad = self.model.out_of_limits(nq)
             if bad:
-                result.issues.append(Issue(
-                    "error", where,
-                    "MOVEL fuera de rango en " + ", ".join(f"J{b + 1}" for b in bad)
-                    + f" al {t:.0%} del recorrido"))
-                return None
+                detail = ", ".join(f"J{b + 1} llega a {nq[b]:.0f}° (rango "
+                                   f"{self.model.joints[b].min_deg:g}/{self.model.joints[b].max_deg:g})"
+                                   for b in bad)
+                self._issue("error", where, f"MOVEL fuera de rango al {t:.0%} del recorrido: {detail}")
+                return samples, True
             q = nq
             samples.append(q)
-        return samples
+        if worst_jump > JUMP_THRESHOLD_DEG:
+            self._issue("aviso", where,
+                        f"Giro brusco de {worst_jump:.0f}° de un eje al {jump_at:.0%} del MOVEL: "
+                        f"probable paso cerca de la singularidad de muñeca")
+        return samples, False
 
-    def _duration(self, samples: list[list[float]], speed: float) -> float:
-        speeds = [j.max_speed_dps * max(speed, 1e-3) for j in self.model.joints]
-        return sum(
-            max(abs(b - a) / v for a, b, v in zip(s0, s1, speeds))
-            for s0, s1 in zip(samples, samples[1:])
-        )
+    def _times(self, samples: list[list[float]], speed: float) -> list[float]:
+        speeds = [j.max_speed_dps * speed for j in self.model.joints]
+        times = [0.0]
+        for s0, s1 in zip(samples, samples[1:]):
+            times.append(times[-1] + max(abs(b - a) / v for a, b, v in zip(s0, s1, speeds)))
+        return times
 
 
 def simulate(backup: PadBackup, model: RobotModel, inputs: dict[int, bool] | None = None,

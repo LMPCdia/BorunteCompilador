@@ -58,7 +58,7 @@ aparecen en orden alfabético.
 | `200` | `SET_OUT` | `point` = `valveID` = salida, `pointStatus` true/false, `delay`, `isWaitInput:false`, `type:0` | Deducido |
 | `800` | `COORD n` | `coordID` | Deducido |
 | `801` | `TOOL n` | `toolID` | Deducido |
-| `10001` | `IF X ON GOTO etiqueta` | `point` = entrada, `pointStatus:1`, `flag` = etiqueta destino, `inout:0`, `limit:"0.000"`, `type:0` | Deducido |
+| `10001` | `IF X ON GOTO etiqueta` | `point` = entrada, `pointStatus:1`, `flag` = etiqueta destino, `inout:0`, `limit:"0.000"`, `type:0`. Las 44 del respaldo tienen `pointStatus:1`; `pointStatus:0` ("si X OFF") **nunca se vio** | Deducido |
 | `20000` | `CALL módulo` | `module` (id como **string**), `flag` | Deducido |
 | `20001` | fin de módulo (`ENDPROC`) | — | Deducido |
 | `50000` | comentario | `comment` (puede traer `&nbsp;`); con `commentAction` es una **acción desactivada** y `comment` es el texto que muestra el pad | Deducido |
@@ -69,8 +69,11 @@ aparecen en orden alfabético.
 ### Detalles de campos
 
 - **`toolCoord`** = herramienta en los 16 bits altos, sistema de coordenadas
-  en los bajos: `131073 = 0x20001` → herramienta 2, coordenadas 1. Coincide
-  con los `800`/`801` de cada módulo. *Deducido.*
+  en los bajos: `131073 = 0x20001` → herramienta 2, coordenadas 1.
+  *Deducido.* Ojo: **no siempre coincide** con el último `800`/`801`: en el
+  respaldo real hay 11 movimientos que no coinciden, 3 módulos sin
+  `800`/`801`, y el principal no tiene ninguno. Lo que manda parece ser el
+  `toolCoord` de cada movimiento (*hipótesis*).
 - **Nombres de E/S**: el pad muestra `point` 2 como `X012`, 3 como `X013` y
   20 como `Y034`. Encaja con numeración **octal empezando en 010**
   (`nombre = octal(point + 8)`). *Hipótesis* — solo 3 casos.
@@ -83,10 +86,20 @@ aparecen en orden alfabético.
   punto". *Desconocido* — se copian tal cual.
 - **`smooth`**: 0–9, probablemente nivel de suavizado (blending). *Hipótesis.*
 
+## Qué genera el compilador y qué no
+
+Ver la tabla de `compiler/pad_codegen.py`. Resumen: por defecto solo se
+exportan formas que aparecen en el respaldo real. Dos cosas que nunca se
+vieron (`IF X == 1`, que necesita `pointStatus:0`, y llamar un módulo desde
+otro módulo) solo se exportan con **Programa → Permitir instrucciones sin
+confirmar en el pad**. En el simulador se permiten siempre.
+
 ## Para confirmar con el pad
 
 Lo más eficiente es exportar respaldos que difieran en **una sola cosa**:
 
+0. Un `IF` "si la entrada está apagada" y un módulo que llame a otro módulo:
+   confirmaría las dos formas que hoy se exportan solo a pedido.
 1. Un `SET_OUT` a una salida conocida (p. ej. `Y010`, `Y011`) y un `IF` sobre
    una entrada conocida → confirma la numeración octal.
 2. Un `WAIT` de 2 s → confirma la acción `100`.

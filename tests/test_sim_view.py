@@ -133,14 +133,18 @@ def test_layout_roundtrip_keeps_relative_paths(tmp_path):
 def test_timeline_interpolates_and_holds_waits(model):
     from compiler.pad_codegen import compile_to_pad
 
-    result = simulate(compile_to_pad(f"MOVEJ {HOME} SPEED 50\nWAIT 1s\n"), model)
+    src = f"MOVEJ {HOME} SPEED 50\nMOVEJ JOINT(40, 45.894, -44.865, -0.792, -75.952, -0.859) SPEED 50\nWAIT 1s\n"
+    result = simulate(compile_to_pad(src), model)
     timeline = Timeline(result)
-    move = result.segments[0].duration_s
+    move = result.segments[1].duration_s
     assert timeline.duration == pytest.approx(move + 1)
-    assert timeline.at(0)[0] == [0.0] * 6
+    assert timeline.at(0)[0][0] == pytest.approx(0.347)       # arranca en el primer MOVEJ
     mid, where = timeline.at(move / 2)
-    assert mid[1] == pytest.approx(45.894 / 2, abs=1.5) and where == "MAIN[3]"
+    assert mid[0] == pytest.approx((0.347 + 40) / 2, abs=0.5) and where.startswith("MAIN[2]")
     assert timeline.at(move + 0.5)[0] == pytest.approx(timeline.at(move)[0])
+    pose, _ = timeline.at(0)
+    pose[0] = 999  # at() devuelve copias
+    assert timeline.at(0)[0][0] != 999
 
 
 # --- pestaña --------------------------------------------------------------------------
@@ -190,15 +194,15 @@ def _backup_zip(tmp_path, source):
 
 
 def test_open_backup_simulates_it_instead_of_the_editor(app, tmp_path):
-    path = _backup_zip(tmp_path, f"MOVEJ {HOME} SPEED 50\nIF X030 == 1 THEN\nWAIT 2s\nENDIF\n")
+    path = _backup_zip(tmp_path, f"MOVEJ {HOME} SPEED 50\nIF X030 == 0 THEN\nWAIT 2s\nENDIF\n")
     reports = []
     view = _view(app, "esto no compila", reports)
     assert view.open_backup(path)
     assert "Prueba" in view.source_label.text()
     assert [b.text() for b in view._input_boxes.values()] == ["X030"]
-    assert view.simulate() is not None
-    view.set_input("X030", True)
-    assert view.result.segments[-1].kind == "WAIT"
+    assert view.simulate().segments[-1].kind == "WAIT"
+    view.set_input("X030", True)  # con X030 prendida se saltea el WAIT
+    assert view.result.segments[-1].kind == "MOVEJ"
     view.use_editor()
     assert view.simulate() is None  # vuelve al editor, que no compila
 
@@ -214,9 +218,15 @@ def test_open_broken_backup_reports(app, tmp_path):
 def test_tools_and_frames_tables_feed_the_simulation(app):
     view = _view(app, f"MOVEJ {HOME} SPEED 50\nTOOL 2\nMOVEL WORLD(1556, 7, 900, 180, 0, 0) SPEED 20\n")
     result = view.simulate()
-    assert "falta cargar herramienta 2" in result.issues[0].message
+    assert "Falta cargar herramienta 2" in result.issues[0].message
+    assert view.load_missing_btn.isVisibleTo(view)
+    view.add_missing_frames()                       # agrega la fila 2, vacía (en rojo)
+    assert view.tools_table.table.rowCount() == 1 and view.tools_table.values() == {}
+    assert view.side_tabs.currentWidget() is view.tools_table
+    view.tools_table.set_values({})
     view.set_tool(2, [0, 0, 100, 0, 0, 0])
     assert view.tools_table.values() == {2: [0, 0, 100, 0, 0, 0]}
+    assert view.stale
     result = view.simulate()
     assert not any("falta cargar" in i.message for i in result.issues)
     assert result.segments[-1].kind == "MOVEL"
@@ -255,3 +265,103 @@ def test_main_window_has_the_sim_tab(app):
 
     window = MainWindow()
     assert window.tabs.indexOf(window.sim_view) >= 0
+
+
+
+# --- robustez (hallazgos de la prueba de usuario) ---------------------------------
+
+
+def test_simulator_messages_are_replaced_not_stacked(app):
+    cleared = []
+    from gui.sim_view import SimView
+
+    view = SimView(lambda: f"MOVEJ {HOME} SPEED 50\n", enable_3d=False,
+                   clear_reports=lambda: cleared.append(1))
+    view.simulate()
+    view.simulate()
+    assert len(cleared) == 2
+
+
+def test_many_issues_go_to_the_problems_tab_not_all_to_the_messages(app):
+    reports = []
+    src = f"MOVEJ {HOME} SPEED 50\n" + "MOVEJ JOINT(0, 80, 0, 0, 0, 0) SPEED 10\n" * 30
+    view = _view(app, src, reports)
+    result = view.simulate()
+    assert view.issues_list.count() == len(result.issues) == 30
+    assert sum(1 for s, _ in reports if s == "error") <= 13
+    assert any("problema(s) más" in m for _, m in reports)
+    item = view.issues_list.item(5)
+    view._on_issue_activated(item)                  # clic: va a ese momento
+    assert view._t == pytest.approx(result.issues[5].time_s)
+
+
+def test_changing_the_model_marks_the_result_stale(app, tmp_path, monkeypatch):
+    import json
+
+    import sim.kinematics as kin
+
+    data = json.loads((kin.MODELS_DIR / "BRTIRUS1820A.json").read_text(encoding="utf-8"))
+    (tmp_path / "Otro.json").write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr(kin, "USER_MODELS_DIR", tmp_path)
+    view = _view(app, f"MOVEJ {HOME} SPEED 50\n")
+    view.simulate()
+    view.set_model("Otro")
+    assert view.stale and "Desactualizado" in view.summary.text()
+    view.play_btn.setChecked(True)                  # no reproduce algo desactualizado
+    assert not view.play_btn.isChecked()
+
+
+def test_broken_model_files_do_not_break_the_tab(app, tmp_path, monkeypatch):
+    import sim.kinematics as kin
+
+    (tmp_path / "A_ROTO.json").write_text("{roto", encoding="utf-8")
+    monkeypatch.setattr(kin, "USER_MODELS_DIR", tmp_path)
+    reports = []
+    view = _view(app, "", reports)
+    assert view.model is not None and view.model.name == "BRTIRUS1820A"
+    assert any(s == "warning" and "A_ROTO.json" in m for s, m in reports)
+    assert not view.set_model("A_ROTO")
+    assert view.model.name == "BRTIRUS1820A"
+
+
+def test_play_without_a_simulation_does_nothing(app):
+    view = _view(app, "")
+    view.play_btn.setChecked(True)
+    assert not view.play_btn.isChecked()
+
+
+def test_bad_files_are_reported_not_raised(app, tmp_path):
+    reports = []
+    view = _view(app, "", reports)
+    bad_stl = tmp_path / "roto.stl"
+    bad_stl.write_text("solid x\nvertex a b c\n")
+    assert view.import_object(bad_stl) is None
+    assert view.import_object(tmp_path / "no_existe.step") is None
+    bad_obj = tmp_path / "roto.obj"
+    bad_obj.write_text("v 0 0 0\nf 1 2 3\n")
+    assert view.import_object(bad_obj) is None
+    cell = tmp_path / "celda.layout.json"
+    cell.write_text("{roto")
+    assert not view.load_layout(cell)
+    cell.write_text('{"objects": [{"name": "a", "path": "x.stl", "inventado": 1}]}')
+    assert not view.load_layout(cell)
+    assert not view.save_layout(tmp_path / "no" / "existe" / "c.layout.json")
+    assert sum(1 for s, _ in reports if s == "error") == 6
+
+
+def test_invalid_and_duplicate_tool_rows_are_not_used(app):
+    view = _view(app, "")
+    table = view.tools_table
+    table.set_values({2: [0, 0, 300, 0, 0, 0]})
+    table.add_row(2)                                 # repetida: vale la primera
+    assert table.values() == {2: [0, 0, 300, 0, 0, 0]} and table.invalid_rows() == [1]
+    table.table.item(0, 3).setText("12mm")           # inválida: no se usa
+    assert table.values() == {2: [0, 0, 0, 0, 0, 0]}
+    assert view.layout_data.tools == table.values()  # la tabla es la fuente de verdad
+
+
+def test_imported_piece_appears_in_front_of_the_robot(app, tmp_path):
+    piece = tmp_path / "mesa.stl"
+    write_stl(box((0, 0, 0), (800, 600, 40)), piece)
+    obj = _view(app, "").import_object(piece)
+    assert (obj.x, obj.y, obj.z) == (1200, 0, 20)

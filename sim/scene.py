@@ -132,18 +132,26 @@ class Timeline:
     """Ángulos de los ejes en función del tiempo, a partir de una simulación."""
 
     def __init__(self, result: SimResult, start_deg: list[float] | None = None) -> None:
+        first = next((s.samples[0] for s in result.segments if s.samples), None)
+        start = start_deg or result.start_deg or first or [0.0] * 6
         self.times: list[float] = [0.0]
-        self.poses: list[list[float]] = [list(start_deg or [0.0] * 6)]
+        self.poses: list[list[float]] = [list(start)]
         self.labels: list[str] = [""]
         t = 0.0
         for seg in result.segments:
-            samples = seg.samples
-            if seg.kind == "WAIT" or len(samples) < 2:
-                t += seg.duration_s
-                self._append(t, samples[-1], seg.where)
+            label = f"{seg.where} {seg.name}".strip()
+            if seg.kind == "WAIT" or len(seg.samples) < 2:
+                # Quieto todo el tramo: primero ubicarse, después esperar.
+                self._append(t, seg.samples[-1], label)
+                t += max(0.0, seg.duration_s)
+                self._append(t, seg.samples[-1], label)
                 continue
-            for i, q in enumerate(samples[1:], start=1):
-                self._append(t + seg.duration_s * i / (len(samples) - 1), q, seg.where)
+            # Cada muestra en su tiempo real (cerca de una singularidad los
+            # tramos chicos en el espacio pueden ser largos en el tiempo).
+            times = seg.times if len(seg.times) == len(seg.samples) else [
+                seg.duration_s * i / (len(seg.samples) - 1) for i in range(len(seg.samples))]
+            for q, dt in zip(seg.samples, times):
+                self._append(t + dt, q, label)
             t += seg.duration_s
 
     def _append(self, t: float, q: list[float], where: str) -> None:
@@ -158,9 +166,9 @@ class Timeline:
     def at(self, t: float) -> tuple[list[float], str]:
         """Ángulos interpolados en `t` y la instrucción que se está ejecutando."""
         if t <= 0:
-            return self.poses[0], self.labels[0]
+            return list(self.poses[0]), self.labels[min(1, len(self.labels) - 1)]
         if t >= self.duration:
-            return self.poses[-1], self.labels[-1]
+            return list(self.poses[-1]), self.labels[-1]
         i = bisect.bisect_right(self.times, t)
         t0, t1 = self.times[i - 1], self.times[i]
         f = 0.0 if t1 == t0 else (t - t0) / (t1 - t0)

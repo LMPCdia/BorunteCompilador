@@ -12,8 +12,8 @@
   },
   "joints": [
     {"min_deg": -165, "max_deg": 165, "max_speed_dps": 190, "sign": 1},
-    {"min_deg": -95, "max_deg": 70, "max_speed_dps": 173, "sign": 1},
-    {"min_deg": -85, "max_deg": 75, "max_speed_dps": 223, "sign": 1},
+    {"min_deg": -95, "max_deg": 70, "max_speed_dps": 173, "sign": -1},
+    {"min_deg": -85, "max_deg": 75, "max_speed_dps": 223, "sign": -1},
     {"min_deg": -180, "max_deg": 180, "max_speed_dps": 254, "sign": 1},
     {"min_deg": -115, "max_deg": 115, "max_speed_dps": 270, "sign": -1},
     {"min_deg": -360, "max_deg": 360, "max_speed_dps": 342, "sign": 1}

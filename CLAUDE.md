@@ -26,8 +26,10 @@ respaldo real; la lógica se prueba contra `comms/robot_simulator.py`.
    decilo explícitamente en el código (comentario) y en tu respuesta.
 2. **El generador del pad no adivina.** Lo que no sabemos expresar en el
    formato del pad es un `CompileError` claro, nunca una acción "probable":
-   el robot ejecuta lo que se le carga sin nadie mirando. Para agregar algo
-   hace falta un respaldo real del pad que lo muestre.
+   el robot ejecuta lo que se le carga sin nadie mirando. Lo que sabemos
+   expresar pero el respaldo real nunca mostró va detrás de
+   `PadOptions.allow_unverified` (apagado por defecto al exportar). Para
+   agregar algo hace falta un respaldo real del pad que lo muestre.
 3. **`docs/PAD_FORMAT.md` e `docs/INSTRUCTION_SET.md` son contratos.** Si tu
    tarea cambia el formato generado o un opcode, avisá antes de seguir.
 4. **Todo cambio en `compiler/` o `runtime/` debe dejar
