@@ -258,8 +258,10 @@ def test_an_infinite_loop_is_simulated_once(model):
     main.insert(len(main) - 1, {"action": 10001, "flag": 0, "inout": 0, "insertedIndex": 51,
                                 "limit": "0.000", "point": 0, "pointStatus": 0, "type": 0})
     result = simulate(backup, model)
-    assert not result.complete
-    assert any("bucle" in i.message for i in result.issues)
+    assert result.cyclic and result.complete      # un ciclo, no "cortado"
+    assert any("cíclico" in i.message for i in result.issues)
+    # UN ciclo: ubicarse (MOVEJ casa) y el MOVEJ a 10°, una sola vez cada uno
+    assert [s.kind for s in result.segments].count("MOVEJ") == 2
     assert result.total_time_s < 10
 
 
@@ -366,3 +368,21 @@ def test_check_cli_reports_compile_errors_without_traceback(tmp_path, capsys):
     src.write_text("MOVEJ nada SPEED 10\n", encoding="utf-8")
     assert check_main([str(src)]) == 2
     assert "Línea 1" in capsys.readouterr().err
+
+
+def test_after_an_out_of_range_failure_the_rest_is_still_evaluated(model):
+    reachable = _world_of(model, HOME, dz=-100)
+    src = (f"MOVEJ {JHOME} SPEED 50\nMOVEL WORLD(300, 1400, 600, 180, 0, 0) SPEED 20\n"
+           + f"MOVEL {reachable} SPEED 20\n" * 3)
+    result = simulate(_pad(src), model)
+    assert result.unevaluated_moves == 0
+    assert result.failed_moves + (result.total_moves - result.skipped_moves) == result.total_moves
+
+
+def test_layout_rejects_incomplete_poses(tmp_path):
+    from sim.scene import Layout
+
+    path = tmp_path / "c.layout.json"
+    path.write_text('{"tools": {"2": [0, 0, "300"]}}', encoding="utf-8")
+    with pytest.raises(ValueError, match="6 números"):
+        Layout.load(path)

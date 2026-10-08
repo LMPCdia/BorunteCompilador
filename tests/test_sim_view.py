@@ -365,3 +365,65 @@ def test_imported_piece_appears_in_front_of_the_robot(app, tmp_path):
     write_stl(box((0, 0, 0), (800, 600, 40)), piece)
     obj = _view(app, "").import_object(piece)
     assert (obj.x, obj.y, obj.z) == (1200, 0, 20)
+
+
+
+# --- segunda ronda de la prueba de usuario ----------------------------------------
+
+
+def test_main_window_fits_a_1600_pixel_screen(app):
+    from gui.main_window import MainWindow
+
+    window = MainWindow()
+    assert window.minimumSizeHint().width() <= 1500
+
+
+def test_controls_are_locked_while_simulating(app):
+    view = _view(app, f"MOVEJ {HOME} SPEED 50\n")
+    seen = []
+
+    def progress(_n):
+        seen.append((view.model_combo.isEnabled(), view.open_backup_btn.isEnabled(),
+                     view.side_tabs.isEnabled()))
+
+    from sim import pad_sim
+
+    original = pad_sim.PROGRESS_EVERY
+    pad_sim.PROGRESS_EVERY = 1
+    view._progress = progress
+    try:
+        view.simulate()
+    finally:
+        pad_sim.PROGRESS_EVERY = original
+    assert seen and all(state == (False, False, False) for state in seen)
+    assert view.model_combo.isEnabled() and view.open_backup_btn.isEnabled()
+
+
+def test_editing_the_program_marks_the_result_stale(app):
+    from gui.main_window import MainWindow
+
+    window = MainWindow()
+    window.sim_view.simulate()
+    window.editor.appendPlainText("; cambio")
+    assert window.sim_view.stale
+
+
+def test_cell_with_an_incomplete_tool_is_rejected_cleanly(app, tmp_path):
+    reports = []
+    view = _view(app, "", reports)
+    cell = tmp_path / "c.layout.json"
+    cell.write_text('{"tools": {"2": [0, 0, "300"]}}', encoding="utf-8")
+    assert not view.load_layout(cell)
+    assert view.layout_data.tools == {}
+    assert any(s == "error" and "6 números" in m for s, m in reports)
+
+
+def test_cell_paths_are_relative_even_outside_the_cell_folder(tmp_path):
+    piece = tmp_path / "piezas" / "mesa.stl"
+    piece.parent.mkdir()
+    write_stl(box((0, 0, 0), (10, 10, 10)), piece)
+    (tmp_path / "celdas").mkdir()
+    path = tmp_path / "celdas" / "c.layout.json"
+    Layout(objects=[LayoutObject("mesa", str(piece))]).save(path)
+    assert "../piezas/mesa.stl" in path.read_text(encoding="utf-8").replace("\\\\", "/")
+    assert Layout.load(path).objects[0].path.endswith("mesa.stl")

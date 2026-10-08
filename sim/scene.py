@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import bisect
 import json
+import math
+import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -101,7 +103,9 @@ class Layout:
             item = asdict(obj)
             # Rutas relativas al layout, para poder mover la carpeta entera.
             try:
-                item["path"] = str(Path(obj.path).resolve().relative_to(path.resolve().parent))
+                # relpath y no relative_to: también sirve con piezas en una carpeta
+                # hermana ("../piezas/mesa.stl"). Falla entre unidades de Windows.
+                item["path"] = os.path.relpath(Path(obj.path).resolve(), path.resolve().parent)
             except ValueError:
                 pass
             data["objects"].append(item)
@@ -117,12 +121,17 @@ class Layout:
             if not Path(obj.path).is_absolute():
                 obj.path = str(path.parent / obj.path)
             objects.append(obj)
-        return cls(
-            model=data.get("model", "BRTIRUS1820A"),
-            objects=objects,
-            tools={int(k): [float(x) for x in v] for k, v in data.get("tools", {}).items()},
-            frames={int(k): [float(x) for x in v] for k, v in data.get("frames", {}).items()},
-        )
+        def poses(key: str) -> dict[int, list[float]]:
+            out = {}
+            for k, v in data.get(key, {}).items():
+                values = [float(x) for x in v]
+                if len(values) != 6 or not all(math.isfinite(x) for x in values):
+                    raise ValueError(f"{key} {k}: hacen falta 6 números (X, Y, Z, U, V, W)")
+                out[int(k)] = values
+            return out
+
+        return cls(model=data.get("model", "BRTIRUS1820A"), objects=objects,
+                   tools=poses("tools"), frames=poses("frames"))
 
 
 # --- línea de tiempo -----------------------------------------------------------------

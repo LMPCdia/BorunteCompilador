@@ -24,9 +24,9 @@ docs/SIMULATOR.md):
   destino (si se encuentra una configuración que llegue); si no, los MOVEL
   siguientes quedan sin evaluar hasta el próximo MOVEJ, en vez de dar una
   cascada de errores falsos.
-- Las entradas son fijas durante toda la simulación: volver a la misma
-  etiqueta con el robot en la misma pose es un bucle infinito seguro. Se
-  simula UNA vuelta y se informa.
+- Las entradas son fijas y el pad no tiene variables: volver a una etiqueta
+  ya visitada (en la misma llamada) es un programa cíclico que se repite para
+  siempre. Se simula UN ciclo, que es el tiempo de ciclo, y se informa.
 """
 
 from __future__ import annotations
@@ -96,6 +96,11 @@ class SimResult:
     start_deg: list[float] | None = None
     missing_tools: list[int] = field(default_factory=list)   # herramientas sin cargar
     missing_frames: list[int] = field(default_factory=list)  # sistemas sin cargar
+    cyclic: bool = False            # el programa vuelve a empezar: se simuló un ciclo
+    # Por qué no se simularon los `skipped_moves`:
+    failed_moves: int = 0           # el robot no llega (error)
+    no_frames_moves: int = 0        # herramienta/coordenadas sin cargar
+    unevaluated_moves: int = 0      # pose desconocida (antes del primer MOVEJ, etc.)
 
     @property
     def total_time_s(self) -> float:
@@ -111,7 +116,11 @@ class Cancelled(Exception):
 
 
 class _Stop(Exception):
-    """Fin de la simulación antes de tiempo (bucle, presupuesto, error fatal)."""
+    """Fin de la simulación antes de tiempo (presupuesto, error fatal)."""
+
+
+class _Cycle(Exception):
+    """El programa volvió a empezar: un ciclo completo ya está simulado."""
 
 
 def _interp_rotation(r0: Matrix, r1: Matrix, t: float) -> list[list[float]]:
@@ -142,8 +151,8 @@ class PadSimulator:
         self._missing_tools: set[int] = set()
         self._missing_frames: set[int] = set()
         self._unknown: dict[int, list[str]] = {}
-        # MOVEL sin evaluar por pose desconocida, agrupados por causa
-        self._unevaluated: dict[str, list[str]] = {}
+        # MOVEL sin evaluar por pose desconocida, agrupados por causa: (dónde, cuándo)
+        self._unevaluated: dict[str, list[tuple[str, float]]] = {}
         self._lost_reason = "el programa no empieza con un MOVEJ (no se conoce la pose inicial)"
         self._elapsed = 0.0  # suma de duraciones (evita recalcularla en cada aviso)
         self._seen_jumps: set = set()
@@ -157,6 +166,8 @@ class PadSimulator:
         modules = {m.id: m for m in backup.act.modules}
         try:
             self._run_program("MAIN", backup.act.main, modules, depth=0, stack=())
+        except _Cycle:
+            pass  # completo: un ciclo es todo lo que hay que ver
         except _Stop:
             result.complete = False
         self._summarize()
@@ -171,6 +182,14 @@ class PadSimulator:
 
     def _issue(self, severity: str, where: str, message: str) -> None:
         self._result.issues.append(Issue(severity, where, message, self._elapsed))
+
+    def _note_on_last_error(self, note: str) -> None:
+        """Agrega una aclaración al último error en vez de sumar otro aviso
+        (un error y su recuperación son UN problema para el usuario)."""
+        for issue in reversed(self._result.issues):
+            if issue.severity == "error":
+                issue.message = f"{issue.message}. {note}"
+                return
 
     def _add_segment(self, segment: Segment) -> None:
         self._result.segments.append(segment)
@@ -191,11 +210,12 @@ class PadSimulator:
                 f"Falta cargar {' y '.join(missing)} (valores del pad, pestañas Herramientas y "
                 f"Coordenadas): los MOVEL que las usan no se simularon."))
         for reason, wheres in self._unevaluated.items():
+            first, when = wheres[0]
             r.issues.append(Issue(
-                "aviso", wheres[0],
+                "aviso", first,
                 f"{len(wheres)} MOVEL sin evaluar porque no se sabía dónde estaba el robot "
-                f"después de {reason} (el primero en {wheres[0]}). Se retoma en el próximo "
-                f"MOVEJ."))
+                f"después de {reason} (el primero en {first}). Se retoma en el próximo "
+                f"MOVEJ.", when))
         for code, wheres in self._unknown.items():
             r.issues.append(Issue(
                 "aviso", wheres[0], f"Acción {code} desconocida ({len(wheres)} vez/veces): no se simula"))
@@ -217,13 +237,14 @@ class PadSimulator:
             self._issue("error", where, f"Salto a la etiqueta {flag}, que no existe en {name}")
             raise _Stop
         pc = labels[flag]
-        key = (stack, name, pc, None if self.q is None else tuple(round(v, 3) for v in self.q))
+        key = (stack, name, pc)
         if key in self._seen_jumps:
+            self._result.cyclic = True
             self._issue("info", where,
-                        f"El programa vuelve a la etiqueta {flag} en la misma situación: es un "
-                        f"bucle (se repite indefinidamente con estas entradas). La simulación "
-                        f"se corta acá.")
-            raise _Stop
+                        f"El programa vuelve a la etiqueta {flag}: es cíclico (con estas "
+                        f"entradas se repite siempre igual). Se simuló un ciclo: "
+                        f"{self._elapsed:.1f} s.")
+            raise _Cycle
         self._seen_jumps.add(key)
         return pc
 
@@ -268,7 +289,11 @@ class PadSimulator:
                                                     f"que no existe: se sigue de largo")
             elif code in (RETURN, END):
                 return
-            elif code in (COMMENT, LABEL, SET_COORD, SET_TOOL):
+            elif code == LABEL:
+                # Pasar por una etiqueta (sin saltar) también cuenta como
+                # visitarla: así un GOTO hacia atrás corta al primer regreso.
+                self._seen_jumps.add((stack, name, pc - 1))
+            elif code in (COMMENT, SET_COORD, SET_TOOL):
                 pass
             else:
                 self._unknown.setdefault(code, []).append(where)
@@ -332,11 +357,13 @@ class PadSimulator:
             missing = True
         if missing:
             r.skipped_moves += 1
+            r.no_frames_moves += 1
             self._lose(f"un MOVEL con herramienta/coordenadas sin cargar ({where})")
             return
         if self.q is None:
             r.skipped_moves += 1
-            self._unevaluated.setdefault(self._lost_reason, []).append(where)
+            r.unevaluated_moves += 1
+            self._unevaluated.setdefault(self._lost_reason, []).append((where, self._elapsed))
             return
         target_tcp = mat_mul(self.frames[coord], pose_matrix(*values))
         samples, failed = self._linear_path(target_tcp, self.tools[tool], where)
@@ -344,6 +371,7 @@ class PadSimulator:
         self._add_segment(Segment("MOVEL", where, samples, times[-1], name, tool, times, failed))
         if failed:
             r.skipped_moves += 1
+            r.failed_moves += 1
             self._recover(mat_mul(target_tcp, invert(self.tools[tool])), where, samples[-1])
         else:
             self.q = samples[-1]
@@ -360,21 +388,33 @@ class PadSimulator:
             [s[0], s[1], s[2], s[3] + d4, s[4] * k, s[5] + d6]
             for s in [self.q] for d4, d6, k in ((180, 180, -1), (-180, -180, -1), (90, 0, 1), (-90, 0, 1))
         ]
+        fallback = None
         for n, seed in enumerate(seeds):
             q = self.model.ik(target_flange, seed)
             if q is not None:
                 q = self.model.wrap_into_limits(q, seed)
+                if fallback is None:
+                    fallback = q
                 if not self.model.out_of_limits(q):
                     self.q = q
                     self._last_known = list(q)
-                    how = "" if n == 0 else " con otra configuración del brazo"
-                    self._issue("info", where, f"Se sigue simulando desde el destino de este "
-                                               f"MOVEL{how}: en la animación el robot salta "
-                                               f"ahí sin recorrido.")
+                    how = "" if n == 0 else " (con otra configuración del brazo)"
+                    self._note_on_last_error(f"Se sigue desde el destino{how}; en la "
+                                             f"animación el robot salta ahí.")
                     # Salto sin tiempo ni trayectoria: no es un movimiento real.
                     self._add_segment(Segment("SALTO", where, [list(last), list(q)], 0.0,
                                               times=[0.0, 0.0]))
                     return
+        if fallback is not None:
+            # El destino solo se alcanza fuera de rango: se sigue igual desde ahí,
+            # para no dejar sin evaluar todo lo que viene (el error ya se reportó).
+            self.q = fallback
+            self._last_known = list(fallback)
+            self._note_on_last_error("Se sigue desde el destino, aunque ahí algún eje queda "
+                                     "fuera de rango.")
+            self._add_segment(Segment("SALTO", where, [list(last), list(fallback)], 0.0,
+                                      times=[0.0, 0.0]))
+            return
         self._lose(f"el MOVEL fallido en {where}")
 
     def _joint_path(self, q0: list[float], q1: list[float]) -> list[list[float]]:
@@ -418,7 +458,7 @@ class PadSimulator:
                 worst_jump, jump_at = jump, t
             bad = self.model.out_of_limits(nq)
             if bad:
-                detail = ", ".join(f"J{b + 1} llega a {nq[b]:.0f}° (rango "
+                detail = ", ".join(f"J{b + 1} llega a {nq[b]:.1f}° (rango "
                                    f"{self.model.joints[b].min_deg:g}/{self.model.joints[b].max_deg:g})"
                                    for b in bad)
                 self._issue("error", where, f"MOVEL fuera de rango al {t:.0%} del recorrido: {detail}")

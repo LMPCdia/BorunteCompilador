@@ -245,9 +245,12 @@ class SimView(QWidget):
         self._timer = QTimer(self)
         self._timer.setInterval(FRAME_MS)
         self._timer.timeout.connect(self._tick)
-        shortcut = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
-        shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        shortcut.activated.connect(lambda: self.play_btn.toggle())
+        # Barra espaciadora = play/pausa solo con la vista 3D enfocada: en el
+        # resto de la pestaña tiene que seguir tildando casillas y apretando botones.
+        if self.viewport is not None:
+            shortcut = QShortcut(QKeySequence(Qt.Key.Key_Space), self.viewport.widget)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(lambda: self.play_btn.toggle())
 
         for problem in RobotModel.problems():
             self._report("warning", problem)
@@ -261,7 +264,7 @@ class SimView(QWidget):
         self.model_combo.addItems(RobotModel.available())
         self.model_combo.currentTextChanged.connect(self.set_model)
         self.source_label = QLabel("Programa: el del editor")
-        open_backup_btn = QPushButton("Abrir respaldo del pad…")
+        self.open_backup_btn = open_backup_btn = QPushButton("Abrir respaldo del pad…")
         open_backup_btn.clicked.connect(self._on_open_backup)
         self.use_editor_btn = QPushButton("Usar el editor")
         self.use_editor_btn.clicked.connect(self.use_editor)
@@ -318,14 +321,16 @@ class SimView(QWidget):
         center_layout.setContentsMargins(0, 0, 0, 0)
         if self.viewport is not None:
             cams = QHBoxLayout()
+            mouse = "Mouse: botón izquierdo gira, derecho desplaza, rueda acerca."
             for label, view in (("Encuadrar", "fit"), ("Iso", "iso"), ("Arriba", "arriba"),
                                 ("Frente", "frente"), ("Lado", "lado")):
                 btn = QPushButton(label)
+                btn.setToolTip(mouse)
                 btn.clicked.connect(lambda _=False, v=view: self.set_camera(v))
                 cams.addWidget(btn)
             cams.addStretch(1)
-            cams.addWidget(QLabel("Mouse: botón izq. gira · der. desplaza · rueda acerca"))
             center_layout.addLayout(cams)
+            self.viewport.widget.setToolTip(mouse)
             center_layout.addWidget(self.viewport.widget, 1)
         else:
             view = QLabel("La vista 3D necesita OpenGL y no está disponible en esta PC.\n"
@@ -359,6 +364,7 @@ class SimView(QWidget):
     def _build_side(self) -> QWidget:
         # -- problemas --
         self.issues_list = QListWidget()
+        self.issues_list.setWordWrap(True)
         self.issues_list.itemActivated.connect(self._on_issue_activated)
         self.issues_list.itemClicked.connect(self._on_issue_activated)
         issues = QWidget()
@@ -381,8 +387,10 @@ class SimView(QWidget):
         remove_btn.clicked.connect(self._on_remove)
         objects = QWidget()
         objects_layout = QVBoxLayout(objects)
-        objects_layout.addWidget(QLabel("Piezas STEP/STL/OBJ. X, Y, Z: dónde queda el origen "
-                                        "del CAD, en mm respecto de la base del robot."))
+        objects_note = QLabel("Piezas STEP/STL/OBJ. X, Y, Z: dónde queda el origen del CAD, en mm "
+                              "respecto de la base del robot.")
+        objects_note.setWordWrap(True)
+        objects_layout.addWidget(objects_note)
         objects_layout.addWidget(self.objects_table, 1)
         row = QHBoxLayout()
         row.addWidget(import_btn)
@@ -408,9 +416,9 @@ class SimView(QWidget):
         tabs.addTab(self.frames_table, "Coordenadas")
         self.side_tabs = tabs
 
-        open_btn = QPushButton("Abrir celda…")
+        self.open_cell_btn = open_btn = QPushButton("Abrir celda…")
         open_btn.clicked.connect(self._on_open_layout)
-        save_btn = QPushButton("Guardar celda…")
+        self.save_cell_btn = save_btn = QPushButton("Guardar celda…")
         save_btn.clicked.connect(self._on_save_layout)
         side = QWidget()
         side_layout = QVBoxLayout(side)
@@ -479,6 +487,11 @@ class SimView(QWidget):
     def use_editor(self) -> None:
         self.backup = None
         self.backup_path = None
+        try:
+            self._refresh_inputs(compile_to_pad_report(self._get_source(),
+                                                       PadOptions(allow_unverified=True))[0])
+        except Exception:  # noqa: BLE001 — si el editor no compila, se ve al simular
+            pass
         self.source_label.setText("Programa: el del editor")
         self.use_editor_btn.setEnabled(False)
         self._clear_result()
@@ -568,7 +581,7 @@ class SimView(QWidget):
             return None
 
         self._running, self._cancel = True, False
-        self.simulate_btn.setEnabled(False)
+        self._set_controls_enabled(False)
         self.cancel_btn.setVisible(True)
         QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
@@ -582,11 +595,12 @@ class SimView(QWidget):
         except Exception as e:  # noqa: BLE001 — que nunca quede la interfaz trabada
             self._clear_result()
             self._report("error", f"Error interno simulando: {e!r}")
+            self.summary.setText(f"<b style='color:#d04040'>Error interno simulando:</b> {e!r}")
             return None
         finally:
             QGuiApplication.restoreOverrideCursor()
             self._running = False
-            self.simulate_btn.setEnabled(True)
+            self._set_controls_enabled(True)
             self.cancel_btn.setVisible(False)
 
         self.result = result
@@ -597,6 +611,25 @@ class SimView(QWidget):
         self._show_summary(result)
         self.set_time(0.0)
         return result
+
+    def _set_controls_enabled(self, enabled: bool) -> None:
+        """Mientras simula, nada de lo que la simulación usa se puede cambiar
+        (el progreso procesa eventos: sin esto se podía cambiar el robot o abrir
+        otro respaldo a mitad de camino y el resultado quedaba mal atribuido)."""
+        for widget in (self.simulate_btn, self.model_combo, self.open_backup_btn,
+                       self.side_tabs, self.open_cell_btn, self.save_cell_btn,
+                       self.inputs_scroll):
+            widget.setEnabled(enabled)
+        self.use_editor_btn.setEnabled(enabled and self.backup is not None)
+
+    def cancel(self) -> None:
+        """Cortar una simulación en curso (p. ej. al cerrar la ventana)."""
+        self._cancel = True
+
+    def source_changed(self) -> None:
+        """El programa del editor cambió."""
+        if self.backup is None:
+            self._mark_stale("cambió el programa")
 
     def _progress(self, _actions: int) -> None:
         QApplication.processEvents()
@@ -632,10 +665,19 @@ class SimView(QWidget):
         parts = [f"<b>{self.model.name}</b>: {done} de {result.total_moves} movimiento(s) "
                  f"simulado(s)"]
         if result.skipped_moves:
-            parts.append(f"<b style='color:#d04040'>⚠ {result.skipped_moves} sin simular</b>")
+            causes = []
+            if result.failed_moves:
+                causes.append(f"{result.failed_moves} no llegan")
+            if result.no_frames_moves:
+                causes.append(f"{result.no_frames_moves} sin herramienta/coordenadas")
+            if result.unevaluated_moves:
+                causes.append(f"{result.unevaluated_moves} sin pose conocida")
+            parts.append(f"<b style='color:#d04040'>⚠ {result.skipped_moves} sin simular "
+                         f"({', '.join(causes)})</b>")
         time_note = " (parcial)" if result.skipped_moves or not result.complete else ""
-        parts.append(f"tiempo de ciclo estimado {result.total_time_s:.1f} s{time_note}, sin "
-                     f"aceleraciones")
+        cycle = " (un ciclo: el programa se repite)" if result.cyclic else ""
+        parts.append(f"tiempo de ciclo estimado {result.total_time_s:.1f} s{time_note}{cycle}, "
+                     f"sin aceleraciones")
         parts.append(f"{errors} error(es), {warnings} aviso(s)")
         if not result.complete:
             parts.append("<b>simulación cortada (ver Problemas)</b>")
@@ -837,12 +879,17 @@ class SimView(QWidget):
         self.layout_data.model = self.model_combo.currentText()
         self.tools_table.set_values(layout.tools)
         self.frames_table.set_values(layout.frames)
-        for obj in layout.objects:
-            if not Path(obj.path).exists():
-                self._report("warning", f"La pieza «{obj.name}» apunta a {obj.path}, que no existe.")
+        self.layout_data.tools = self.tools_table.values()     # la tabla manda
+        self.layout_data.frames = self.frames_table.values()
+        if self.viewport is None:  # con vista 3D, el aviso sale al cargar la malla
+            for obj in layout.objects:
+                if not Path(obj.path).exists():
+                    self._report("warning", f"La pieza «{obj.name}» apunta a {obj.path}, que no existe.")
         self._refresh_objects(rebuild=True)
         self._update_axes()
         self._mark_stale("se abrió otra celda")
+        self._report("info", f"Celda abierta: {Path(path).name} ({len(layout.objects)} pieza(s), "
+                             f"{len(layout.tools)} herramienta(s), {len(layout.frames)} sistema(s)).")
         return True
 
     def save_layout(self, path: str | Path) -> bool:

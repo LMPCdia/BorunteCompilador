@@ -148,6 +148,7 @@ class MainWindow(QMainWindow):
         self.sim_view = SimView(self.editor.toPlainText, report=self._sim_report,
                                 clear_reports=lambda: self.messages.clear_source("simulador"))
         self.tabs.addTab(self.sim_view, "Simulación 3D")
+        self.editor.textChanged.connect(self.sim_view.source_changed)
 
     def _build_points_tab(self) -> QWidget:
         container = QWidget()
@@ -465,8 +466,11 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "messages"):  # todavía construyendo la ventana
             self._pending_reports.append((severity, message))
             return
+        # Los avisos de modelos rotos no son de una simulación: no se borran
+        # cuando arranca la siguiente.
+        source = "modelos" if message.startswith("Modelo de robot") else "simulador"
         {"info": self.messages.info, "warning": self.messages.warning,
-         "error": self.messages.error}[severity](message, "simulador")
+         "error": self.messages.error}[severity](message, source)
         if severity == "error":
             self._show_messages_dock()
 
@@ -595,6 +599,12 @@ class MainWindow(QMainWindow):
 
         self.status_vm.setText("VM: detenida")
         self._refresh_action_states()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 — nombre de Qt
+        # Una simulación en curso procesa eventos: sin esto seguía corriendo
+        # después de cerrar la ventana.
+        self.sim_view.cancel()
+        super().closeEvent(event)
 
     def is_running(self) -> bool:
         return self._worker is not None
