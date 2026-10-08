@@ -26,6 +26,7 @@ from PySide6.QtGui import QAction, QFont, QKeySequence, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDockWidget,
+    QFrame,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
@@ -34,6 +35,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QStyle,
     QTableWidget,
@@ -80,6 +82,18 @@ soldar_pieza()
 """
 
 MONOSPACE = "Consolas, Menlo, monospace"
+
+
+def _scrollable(widget: QWidget) -> QScrollArea:
+    """Envuelve un panel para que, si la ventana es más angosta que lo que el
+    panel necesita, aparezca una barra de desplazamiento en vez de agrandar el
+    ancho mínimo de TODA la ventana. Sin esto, en Windows (fuentes y estilos
+    más anchos que en Linux) la ventana pedía 2300 px y no entraba en pantalla."""
+    area = QScrollArea()
+    area.setWidget(widget)
+    area.setWidgetResizable(True)
+    area.setFrameShape(QFrame.Shape.NoFrame)
+    return area
 
 
 class MainWindow(QMainWindow):
@@ -147,7 +161,8 @@ class MainWindow(QMainWindow):
         self._pending_reports: list[tuple[str, str]] = []
         self.sim_view = SimView(self.editor.toPlainText, report=self._sim_report,
                                 clear_reports=lambda: self.messages.clear_source("simulador"))
-        self.tabs.addTab(self.sim_view, "Simulación 3D")
+        self.sim_tab = _scrollable(self.sim_view)
+        self.tabs.addTab(self.sim_tab, "Simulación 3D")
         self.editor.textChanged.connect(self.sim_view.source_changed)
 
     def _build_points_tab(self) -> QWidget:
@@ -208,7 +223,7 @@ class MainWindow(QMainWindow):
     ) -> QDockWidget:
         dock = QDockWidget(title, self)
         dock.setObjectName(f"dock_{key}")
-        dock.setWidget(widget)
+        dock.setWidget(_scrollable(widget))
         self.addDockWidget(area, dock)
         self._docks[key] = dock
         return dock

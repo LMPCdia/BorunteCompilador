@@ -264,7 +264,7 @@ def test_main_window_has_the_sim_tab(app):
     from gui.main_window import MainWindow
 
     window = MainWindow()
-    assert window.tabs.indexOf(window.sim_view) >= 0
+    assert window.tabs.indexOf(window.sim_tab) >= 0
 
 
 
@@ -375,7 +375,9 @@ def test_main_window_fits_a_1600_pixel_screen(app):
     from gui.main_window import MainWindow
 
     window = MainWindow()
-    assert window.minimumSizeHint().width() <= 1500
+    # Los paneles anchos se desplazan en vez de agrandar la ventana: el mínimo
+    # tiene que ser chico en cualquier plataforma (en Windows pedía 2328 px).
+    assert window.minimumSizeHint().width() <= 900
 
 
 def test_controls_are_locked_while_simulating(app):
@@ -427,3 +429,13 @@ def test_cell_paths_are_relative_even_outside_the_cell_folder(tmp_path):
     Layout(objects=[LayoutObject("mesa", str(piece))]).save(path)
     assert "../piezas/mesa.stl" in path.read_text(encoding="utf-8").replace("\\\\", "/")
     assert Layout.load(path).objects[0].path.endswith("mesa.stl")
+
+
+def test_highlighting_does_not_mark_the_result_stale(app):
+    from gui.main_window import MainWindow
+
+    window = MainWindow()
+    window.sim_view.simulate()
+    window.highlighter.rehighlight()   # cambia formatos, no el texto
+    QApplication.processEvents()
+    assert not window.sim_view.stale

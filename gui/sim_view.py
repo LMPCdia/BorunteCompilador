@@ -226,6 +226,7 @@ class SimView(QWidget):
         self._running = False
         self._cancel = False
         self._object_index: dict[int, int] = {}  # fila de la tabla -> objeto en la vista
+        self._simulated_source: str | None = None
         # Archivo .ini (no el registro de Windows): los tests lo redirigen a una
         # carpeta temporal con QSettings.setPath (tests/conftest.py).
         self._settings = QSettings(QSettings.Format.IniFormat, QSettings.Scope.UserScope,
@@ -580,6 +581,7 @@ class SimView(QWidget):
             self._report("error", "No hay un modelo de robot cargado.")
             return None
 
+        self._simulated_source = None if self.backup is not None else self._get_source()
         self._running, self._cancel = True, False
         self._set_controls_enabled(False)
         self.cancel_btn.setVisible(True)
@@ -627,8 +629,9 @@ class SimView(QWidget):
         self._cancel = True
 
     def source_changed(self) -> None:
-        """El programa del editor cambió."""
-        if self.backup is None:
+        """El programa del editor (quizás) cambió. Se compara el texto: el
+        resaltado de sintaxis dispara la misma señal sin cambiar nada."""
+        if self.backup is None and self._get_source() != self._simulated_source:
             self._mark_stale("cambió el programa")
 
     def _progress(self, _actions: int) -> None:
