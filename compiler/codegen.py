@@ -22,8 +22,7 @@ Alcance v0.3 (limitaciones conocidas, a propósito):
     operadores que `==`.
   - PROC tiene calling convention por slots fijos, sin pila de frames: no es
     recursiva ni reentrante, y los parámetros son por valor. Ver la sección
-    "Calling convention de PROC" en docs/INSTRUCTION_SET.md — esas mismas
-    limitaciones las tiene que respetar plc_vm/.
+    "Calling convention de PROC" en docs/INSTRUCTION_SET.md.
   - Los offsets de puntos se resuelven en tiempo de compilación, no en
     runtime.
   - La tabla de puntos no se deduplica: cada MOVEJ/MOVEL registra una entrada

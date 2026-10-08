@@ -41,6 +41,10 @@ Expr = Const | VarRef | BinOp
 @dataclass
 class PointLiteral:
     pose: Pose
+    # "WORLD" (X,Y,Z,U,V,W) o "JOINT" (J1..J6). La VM de referencia no los
+    # distingue; el generador del pad sí, porque MOVEJ y MOVEL esperan cosas
+    # distintas (ver compiler/pad_codegen.py).
+    frame: str = "WORLD"
 
 
 @dataclass

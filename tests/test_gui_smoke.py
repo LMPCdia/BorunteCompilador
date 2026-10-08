@@ -260,3 +260,33 @@ def test_generated_declaration_recompiles():
     decl = MainWindow.point_declaration("p_test", Pose(1.5, -2.25, 3.0, 0.0, 0.0, 180.0))
     program = compile_source(decl + "\nMOVEJ p_test SPEED 50\n")
     assert program.point_names["p_test"] == 0
+
+
+# --- exportar al pad ------------------------------------------------------------
+
+
+def test_example_program_exports_to_the_pad(window, tmp_path):
+    from pad.backup import PadBackup
+
+    path = window.export_to_pad(tmp_path)
+    assert path is not None and path.parent == tmp_path
+    assert path.name.startswith("HCBackupRobot_") and path.suffix == ".zip"
+    backup = PadBackup.read(path)
+    assert [m.name for m in backup.act.modules] == ["soldar_pieza"]
+    assert "CALL soldar_pieza()" in window.pad_view.toPlainText()
+    assert window.tabs.currentWidget() is window.pad_view
+
+
+def test_export_error_goes_to_the_messages_and_writes_nothing(window, tmp_path):
+    window.editor.setPlainText("WAIT_IN(X010, 5)\n")
+    assert window.export_to_pad(tmp_path) is None
+    assert list(tmp_path.iterdir()) == []
+    assert any("WAIT_IN" in text for _level, _source, text in window.messages.messages())
+
+
+def test_pad_program_name_comes_from_the_file(window, tmp_path):
+    from pathlib import Path
+
+    assert window.pad_program_name() == "BorunteDSL"
+    window._current_path = Path(tmp_path) / "Reja grande ñ.krlb"
+    assert window.pad_program_name() == "Reja_grande__"

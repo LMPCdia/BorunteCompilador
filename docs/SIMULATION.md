@@ -1,6 +1,6 @@
 # Desarrollo sin hardware — estrategia de simulación
 
-No tener el PLC ni el robot a mano no bloquea el desarrollo del `compiler/`
+No tener el robot a mano no bloquea el desarrollo del `compiler/`
 ni del `runtime/` (VM de referencia) ni de la `gui/`. Lo que sí bloquea es
 la validación final de los supuestos sobre el comportamiento real del
 Borunte — eso se pospone, no se evita.
@@ -64,15 +64,18 @@ Todo el resto del código (VM, compiler, GUI) queda igual.
 - Comportamiento de alarmas reales del robot.
 - Si `0x4E23` en verdad requiere alguna selección previa en el pad (la
   duda abierta de siempre — ver `docs/MODBUS_REGISTER_MAP.md`).
-- El PLC CX3G en sí — no hay simulador de ladder/IL. `runtime/vm.py` es una
-  aproximación en Python al comportamiento que después hay que escribir a
-  mano en el PLC real.
+- El controlador del Borunte ejecutando el respaldo del pad. `runtime/vm.py`
+  simula la *lógica* del programa, no cómo la interpreta el pad: por ejemplo,
+  en la VM un `IF X010 == 1` lee una variable, no la entrada, y las E/S se
+  numeran en decimal y no en octal como en el pad.
 
 ## Próximo hito cuando llegue el hardware
 
-1. Correr `comms/robot_client.py` manualmente contra el robot real, un
-   método a la vez, confirmando o corrigiendo cada supuesto.
-2. Actualizar `comms/robot_simulator.py` para que coincida con la realidad.
-3. Re-correr `tests/test_end_to_end.py` — si algo del diseño del bytecode
-   dependía de un supuesto incorrecto, va a fallar ahí, en un solo lugar.
-4. Recién ahí, empezar a portar `runtime/vm.py` a ladder/IL en GX Developer/Works2.
+1. **Importar en el pad un respaldo reescrito sin cambios** por
+   `pad/backup.py` (prueba que el pad acepta lo que generamos), y después uno
+   generado por `compiler/pad_codegen.py`, a velocidad baja. Ver
+   `docs/PAD_FORMAT.md`, "Para confirmar".
+2. Correr `comms/robot_client.py` manualmente contra el robot real, un
+   método a la vez, confirmando o corrigiendo cada supuesto (lo usan la
+   digitalización de puntos y la simulación contra el robot real).
+3. Actualizar `comms/robot_simulator.py` para que coincida con la realidad.

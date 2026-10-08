@@ -31,10 +31,14 @@ statement: point_decl
 point_decl: "POINT" NAME "=" point_expr NEWLINE
 
 point_expr: world_literal
+          | joint_literal
           | NAME                        -> point_ref
           | point_expr "+" offset_expr  -> point_offset
 
 world_literal: "WORLD" "(" number ("," number)~5 ")"
+// Posición por ejes (J1..J6, en grados). El MOVEJ del pad guarda ángulos de
+// eje, no X/Y/Z: ver docs/PAD_FORMAT.md.
+joint_literal: "JOINT" "(" number ("," number)~5 ")"
 offset_expr: "OFFSET" "(" signed_number ("," signed_number)~5 ")"
 
 var_decl: "VAR" NAME ":" TYPE ("=" expr)? NEWLINE

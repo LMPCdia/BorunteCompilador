@@ -1,92 +1,61 @@
 # borunte-dsl
 
-Lenguaje tipo KRL para orquestar un robot Borunte a través de un PLC Coolmay
-CX3G vía Modbus. Ver `docs/ARCHITECTURE.md` primero, y `docs/SIMULATION.md`
-si no tenés el hardware a mano (spoiler: no lo necesitás para seguir
-avanzando).
+Lenguaje tipo KRL para programar un robot Borunte desde la PC. El programa se
+compila a un **respaldo del pad** (`HCBackupRobot_<fecha>.zip`), se importa en
+el teach pendant por pendrive y lo ejecuta el controlador del robot solo.
+
+Leer primero `docs/ARCHITECTURE.md` y `docs/PAD_FORMAT.md`.
 
 ## Estado actual
 
-- [x] Arquitectura de 2 niveles definida y documentada
-- [x] Mapa de registros Modbus del Borunte consolidado
-- [x] **Contrato de bytecode v0.2** (`docs/INSTRUCTION_SET.md`, DRAFT sin
-      validar contra hardware): opcodes, formato de 8 words, calling
-      convention de `PROC`, y el bloque de registros de control de la VM
-- [x] Cliente Modbus del robot (`comms/robot_client.py`)
-- [x] **Simulador del robot** (`comms/robot_simulator.py`) — permite probar
-      todo sin hardware; supuestos documentados en `docs/SIMULATION.md`
-- [x] Gramática v0.2 del DSL (`compiler/grammar.lark`)
-- [x] **AST propio de dos pasadas** (`compiler/ast_nodes.py` +
-      `compiler/ast_builder.py`) — reemplaza el Transformer de una sola
-      pasada que no podía resolver saltos hacia adelante
-- [x] **Codegen v0.3 completo**: `POINT`, `VAR`, `MOVEJ`/`MOVEL`, `WAIT_IN`,
-      `SET_OUT`, `WAIT`, `IF`/`ELSE` (con `VAR == CONST` **y `VAR == VAR`**),
-      `PROC`/llamadas **con parámetros** (incluye llamadas hacia adelante), y
-      asignación entre variables
-- [x] VM de referencia en Python (`runtime/vm.py`), con parada
-      (`request_stop()`)
-- [x] **Cliente Modbus del PLC CX3G** (`comms/plc_client.py`): carga el
-      bytecode, arranca/para la VM del ladder y lee su estado en vivo.
-      ⚠️ Todo el nivel PLC es propuesta **sin confirmar** — ver abajo.
-- [x] **GUI v0.2 (PySide6)** con paneles acoplables al estilo WorkVisual:
-      editor con resaltado de sintaxis, estructura del proyecto navegable,
-      propiedades, ventana de mensajes, campos de trabajo, digitalización de
-      puntos, y ejecutar/parar en un hilo aparte con log en vivo
-- [x] **Empaquetado**: `dist/BorunteDSL.exe` de un solo archivo, con
-      `--self-test` como criterio de aceptación
-- [x] **154 tests en verde**
-- [ ] Panel de la GUI para la VM del PLC — `comms/plc_client.py` existe pero
-      todavía nadie lo usa desde la interfaz (ver "Próximos pasos")
-- [ ] VM en ladder/IL para el CX3G real (bloqueada hasta tener hardware)
+- [x] Gramática del DSL (`compiler/grammar.lark`) con puntos `WORLD(...)`
+      (X,Y,Z,U,V,W) y `JOINT(...)` (ángulos de eje)
+- [x] AST de dos pasadas (`compiler/ast_nodes.py`, `compiler/ast_builder.py`)
+- [x] **Formato del respaldo del pad decodificado** a partir de un respaldo
+      real (`pad/backup.py`, `docs/PAD_FORMAT.md`): leer y reescribir da el
+      mismo contenido byte a byte
+- [x] **Generador para el pad** (`compiler/pad_codegen.py`): `MOVEJ`/`MOVEL`,
+      `SET_OUT`, `WAIT`, `PROC`/llamadas e `IF` sobre entradas
+- [x] Listado legible de cualquier respaldo (`python -m pad.listing`)
+- [x] VM de referencia en Python (`runtime/vm.py`) para simular la lógica en la
+      PC, contra el simulador del robot (`comms/robot_simulator.py`)
+- [x] Cliente Modbus del robot (`comms/robot_client.py`) para digitalizar puntos
+- [x] GUI (PySide6) con "Exportar para el pad" (Ctrl+E)
+- [x] Ejecutable de Windows de un solo archivo, construido en GitHub Actions
+- [ ] **Probar en el pad** un respaldo generado (nadie lo hizo todavía)
+- [ ] Espera de entrada, `ELSE` y variables en el pad (falta un ejemplo del
+      pad para decodificarlos)
 
-## Lo que NO está confirmado contra hardware
+## Lo que NO está confirmado
 
-Nada de esto se probó contra un robot o un PLC real. Está marcado como
-hipótesis en el código y en la documentación, no como hecho.
+Nada de esto se probó todavía en el pad. Está marcado como hipótesis en el
+código y en `docs/PAD_FORMAT.md`, que le pone un grado de confianza a cada
+dato. Lo más importante:
 
-**Del PLC** (ver el docstring de `comms/plc_client.py`, que las lista
-ordenadas por riesgo):
+1. **Que el pad importe lo que generamos.** El formato reproduce byte a byte
+   un respaldo real, pero un respaldo nuevo nunca se importó.
+2. **La numeración de las E/S**: octal empezando en `010` (`Y034` = salida 20).
+   Salió de solo 3 casos.
+3. **`WAIT`** (acción `100`) e **`IF` sobre entrada en OFF** (`pointStatus: 0`).
+4. **Herramienta y coordenadas**: se exporta todo con herramienta 0 y
+   coordenadas 0 salvo que se cambie en `PadOptions`.
 
-1. Que el registro `Dn` del PLC se lea/escriba como holding register Modbus
-   número `n`. Parametrizado en `d_register_base` para corregirlo en un solo
-   lugar.
-2. Que los enteros de 32 bits se guarden con el **word bajo primero**
-   (convención FX de Mitsubishi) — **al revés que el robot Borunte**, donde el
-   ejemplo confirmado del manual manda el word alto primero. Las dos
-   convenciones conviven a propósito. **Es la que más conviene validar
-   primero**: si está al revés, todo carga "bien" y ejecuta cualquier cosa.
-3. Que el mapa de control (`D0-D109`) y las bases de las tablas (`D1000`,
-   `D4000`) sean los del contrato — que todavía nadie implementó en ladder.
-4. Que el handshake de comandos funcione como está documentado (el host
-   escribe en `D3`, la VM lo devuelve a `0` al aceptarlo).
+**Probá cada programa nuevo primero a velocidad baja.**
 
-**Del robot** (ya estaba en `docs/SIMULATION.md`): que escribir una pose en el
-bloque `800-890` y disparar "Start" mueva el robot, y con qué latencia por
-transacción.
+## Limitaciones conocidas (a propósito, no bugs escondidos)
 
-## Limitaciones conocidas (documentadas a propósito, no bugs escondidos)
+Para el pad, lo que no sabemos expresar es un error de compilación claro:
 
-Del compilador:
+- `MOVEJ` necesita un punto `JOINT(...)` y `MOVEL` uno `WORLD(...)`. El MOVEJ
+  del pad guarda ángulos de eje: mandarle X/Y/Z movería el robot a cualquier
+  lado.
+- Sin `VAR`, asignaciones, `ELSE`, `WAIT_IN` ni `PROC` con parámetros.
+- `IF` solo pregunta por una entrada: `IF X010 == 1 THEN` o `== 0`.
+- Los offsets de puntos (`p + OFFSET(...)`) se resuelven al compilar.
 
-- `IF` solo soporta `==`: `VAR == CONST` o `VAR == VAR`, no expresiones
-  compuestas ni otros operadores. Intentarlo tira `CompileError` clara, no
-  bytecode incorrecto.
-- La calling convention de `PROC` usa **slots fijos, sin pila de frames**: no
-  es recursiva ni reentrante, y los parámetros son por valor. Está documentado
-  en el contrato para que `plc_vm/` respete las mismas reglas.
-- La tabla de puntos **no se deduplica**: cada `MOVEJ`/`MOVEL` agrega una
-  entrada aunque mueva a un `POINT` ya declarado (el programa de ejemplo da 5
-  entradas para 2 puntos). La GUI lo advierte al compilar. Importa porque en el
-  PLC caben 333.
-- Los offsets de puntos (`p + OFFSET(...)`) se resuelven en tiempo de
-  compilación, no en runtime.
-- No hay bucles (`WHILE`/`FOR`), y `TIMER` se parsea pero no emite nada.
-
-De la parada:
-
-- `PARAR` corta en el próximo límite de instrucción y **no interrumpe el
-  movimiento en curso**. Un paro de emergencia de verdad va por una línea
-  física al robot, no por Modbus ni por ese botón.
+De la VM de referencia (solo simulación): `IF` solo con `==`, `PROC` sin pila
+de frames, y la tabla de puntos no se deduplica. En la VM un `IF X010 == 1`
+lee una variable, no la entrada.
 
 ## Setup
 
@@ -113,9 +82,20 @@ Para abrir la GUI:
 python -m gui.app
 ```
 
-Se abre con un programa de ejemplo ya cargado. Flujo: "Conectar" (dejá
-"Simulador" tildado si no tenés hardware) → **F7** compilar → **F5** ejecutar.
-**Shift+F5** para, **F8** digitaliza el punto actual del robot.
+Se abre con un programa de ejemplo ya cargado.
+
+- **Ctrl+E — Exportar para el pad**: genera `HCBackupRobot_<fecha>.zip` en la
+  carpeta que elijas y muestra el listado en la pestaña "Pad". Se copia a la
+  raíz de un pendrive y se importa desde el pad.
+- Para probar la lógica en la PC: "Conectar" (dejá "Simulador" tildado) →
+  **F7** compilar → **F5** ejecutar. **Shift+F5** para.
+- **F8** digitaliza el punto actual del robot (necesita conexión Modbus).
+
+Para ver cualquier respaldo del pad en texto:
+
+```bash
+python -m pad.listing HCBackupRobot_20260814213843.zip
+```
 
 Para verificar la instalación sin abrir ventana:
 
@@ -142,49 +122,39 @@ compila cruzado.
 
 El script corre los tests, empaqueta, y **no da el `.exe` por bueno hasta que
 pase `--self-test` sobre el binario ya construido**. Eso no es ceremonia:
-`compiler/grammar.lark` se lee como archivo en tiempo de ejecución, así que un
+`compiler/grammar.lark` y `pad/template.fnc` se leen como archivos en tiempo
+de ejecución, así que un
 empaquetado incompleto produce un ejecutable que abre bien y falla al compilar
 el primer programa — y con `console=False` ese error no se ve en ninguna parte.
 
 ## Estructura
 
 ```
-compiler/    parser (Lark) + AST de dos pasadas + codegen → bytecode
-comms/       robot_client.py (robot), plc_client.py (PLC CX3G),
-             robot_simulator.py + fake_modbus.py (para probar sin hardware)
-runtime/     bytecode.py (Instruction/Program/opcodes), vm.py (VM de
-             referencia), plc_io_simulator.py (E/S simulada del PLC)
-pad/         backup.py (leer/escribir HCBackupRobot_*.zip del pad),
-             listing.py (listado legible) — ver docs/PAD_FORMAT.md
-gui/         main_window.py + paneles (project_tree, properties_panel,
-             message_window, work_fields, connection_panel,
-             syntax_highlighter), vm_worker.py, app.py (--self-test)
+compiler/    gramática (Lark) + AST + pad_codegen.py (respaldo del pad)
+             + codegen.py (bytecode para la VM de referencia)
+pad/         backup.py (leer/escribir HCBackupRobot_*.zip), listing.py
+             (listado legible), template.fnc
+comms/       robot_client.py (Modbus del robot), robot_simulator.py +
+             fake_modbus.py (para probar sin hardware)
+runtime/     bytecode.py, vm.py (VM de referencia), plc_io_simulator.py (E/S
+             simuladas)
+gui/         main_window.py + paneles, vm_worker.py, app.py (--self-test)
 packaging/   spec de PyInstaller, build_exe.ps1, datafiles.py
-plc_vm/      SOLO documentación — la VM real se escribe a mano en
-             GX Developer/Works2 una vez validado el contrato con hardware
+docs/        ARCHITECTURE.md, PAD_FORMAT.md, INSTRUCTION_SET.md,
+             MODBUS_REGISTER_MAP.md, SIMULATION.md
 tests/
-docs/        ARCHITECTURE.md, MODBUS_REGISTER_MAP.md, INSTRUCTION_SET.md,
-             SIMULATION.md, PAD_FORMAT.md
 ```
 
 ## Próximos pasos sugeridos, en orden
 
-1. **Panel de la GUI para la VM del PLC.** `comms/plc_client.py` sabe cargar
-   el programa, arrancarlo, pararlo y leer el Program Counter en vivo, pero
-   nadie lo usa: hoy el "Ejecutar" de la barra corre la VM de referencia en la
-   PC, no en el CX3G. Falta el panel que cargue el programa compilado y muestre
-   PC + estado + banco de variables en vivo. El poll del estado va en un hilo
-   aparte, como `gui/vm_worker.py`, no en el hilo de la UI.
-2. **Deduplicar la tabla de puntos en el codegen.** Cambia los índices del
-   bytecode, así que hay que hacerlo con los tests delante.
-3. **Persistencia de los puntos digitalizados** (decisión de diseño 3 de
-   `docs/ARCHITECTURE.md`: SQLite/JSON en la PC). Hoy viven solo en memoria de
-   la GUI y se pierden al cerrarla.
-4. Recordar la disposición de los paneles entre sesiones
-   (`QMainWindow.saveState`).
-5. Cuando llegue el hardware: seguir `docs/SIMULATION.md` → "Próximo hito
-   cuando llegue el hardware", y validar primero la hipótesis 2 del PLC (orden
-   de los words de 32 bits).
-
-`plc_vm/` sigue sin ser delegable a un agente: necesita a alguien con
-GX Developer/Works2 y, eventualmente, el hardware real.
+1. **Probar en el pad**, en este orden: importar un respaldo reescrito sin
+   cambios, después uno generado, a velocidad baja. Ver `docs/PAD_FORMAT.md`,
+   "Para confirmar".
+2. **Exportar del pad un respaldo de prueba** con una espera de entrada, un
+   salto incondicional y una variable, para poder agregar `WAIT_IN`, `ELSE` y
+   `VAR` al generador.
+3. **Elegir herramienta y coordenadas desde la GUI** (hoy van en 0/0) y usar
+   un respaldo del propio robot como plantilla (`PadOptions.template`).
+4. **Digitalizar en `JOINT`** además de `WORLD`, para poder usar los puntos
+   digitalizados en un `MOVEJ`.
+5. **Persistencia de los puntos digitalizados** (hoy viven en memoria).

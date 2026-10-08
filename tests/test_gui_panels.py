@@ -191,18 +191,6 @@ def test_point_properties_show_the_right_values(app, program):
     assert panel.value_of("W") == "30"
 
 
-def test_properties_show_the_plc_register(app, program):
-    tree = ProjectTree()
-    tree.rebuild(program, PROGRAMA)
-    panel = PropertiesPanel()
-
-    panel.show_item(tree.topLevelItem(0).child(0))  # p_home, índice 0
-    assert panel.value_of("Registro D del PLC") == "D4000"
-
-    panel.show_item(tree.topLevelItem(2).child(0))  # primera variable
-    assert panel.value_of("Registro D del PLC").startswith("D1")
-
-
 def test_properties_panel_clears_with_none(app, program):
     tree = ProjectTree()
     tree.rebuild(program, PROGRAMA)

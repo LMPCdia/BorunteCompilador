@@ -2,11 +2,9 @@
 VM de referencia: ejecuta un Program (runtime/bytecode.py) contra un
 BorunteRobotClient (real o simulado) y un PlcIoSimulator.
 
-Esta clase es, a propósito, un espejo de lo que después hay que escribir a
-mano en ladder/IL para el CX3G (ver plc_vm/README.md). Cada método
-`_exec_XXX` de acá debería tener un equivalente directo en la red de ladder
-del PLC real. Si algo acá queda ambiguo o poco claro, es señal de que el
-diseño del opcode todavía no está listo para pasar a ladder.
+Sirve para probar un programa en la PC (contra el simulador) antes de
+exportarlo al pad con compiler/pad_codegen.py. En producción el programa lo
+ejecuta el controlador del Borunte, no esta VM.
 """
 
 from __future__ import annotations

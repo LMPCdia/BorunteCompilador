@@ -92,6 +92,10 @@ class _AstBuilder(Transformer):
         vals = [float(a) for a in args]
         return PointLiteral(Pose(*vals))
 
+    def joint_literal(self, args):
+        vals = [float(a) for a in args]
+        return PointLiteral(Pose(*vals), frame="JOINT")
+
     def offset_expr(self, args):
         vals = [float(a) for a in args]
         return Pose(*vals)

@@ -1,6 +1,5 @@
 """
-Panel "Propiedades": detalle del nodo seleccionado en el árbol del proyecto,
-incluido en qué registro `D` del PLC va a quedar.
+Panel "Propiedades": detalle del nodo seleccionado en el árbol del proyecto.
 
 Las propiedades llegan como **lista de pares**, no como dict. Es a propósito y
 no es un detalle de estilo: guardar un dict en los datos de un QTreeWidgetItem

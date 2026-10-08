@@ -5,7 +5,7 @@ propiedades a la derecha, mensajes y log abajo, y el editor / bytecode /
 puntos en el centro.
 
     ┌───────────────── menú + barra de herramientas ─────────────────┐
-    │ Estructura   │  Programa │ Bytecode │ Puntos      │ Propiedades │
+    │ Estructura   │ Programa │ Bytecode │ Puntos │ Pad │ Propiedades │
     │ del proyecto │                                    │             │
     ├──────────────┤                                    │             │
     │ Campos de    │                                    │             │
@@ -17,6 +17,9 @@ puntos en el centro.
 """
 
 from __future__ import annotations
+
+import re
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread
 from PySide6.QtGui import QAction, QFont, QKeySequence, QTextCursor
@@ -42,6 +45,7 @@ from PySide6.QtWidgets import (
 
 from comms.robot_client import Pose
 from compiler.codegen import CompileError, compile_source
+from compiler.pad_codegen import PadOptions, compile_to_pad
 from gui.connection_panel import ConnectionPanel
 from gui.message_window import MessageWindow
 from gui.project_tree import POSE_AXIS_NAMES, ProjectTree
@@ -49,25 +53,22 @@ from gui.properties_panel import PropertiesPanel
 from gui.syntax_highlighter import DslSyntaxHighlighter
 from gui.vm_worker import VmWorker
 from gui.work_fields import WorkFieldsPanel, field_by_key
+from pad.listing import list_backup
 from runtime.bytecode import Program
 from runtime.plc_io_simulator import PlcIoSimulator
 
 EXAMPLE_PROGRAM = """; Programa de ejemplo — soldadura de una pieza
-POINT p_home = WORLD(0.0, 500.0, 300.0, 0.0, 0.0, 0.0)
+; MOVEJ va a puntos JOINT (ángulos de eje) y MOVEL a puntos WORLD (X,Y,Z,U,V,W).
+; Las E/S se escriben como en el pad: X010, Y034, ...
+POINT p_home = JOINT(0.0, 45.0, -45.0, 0.0, -75.0, 0.0)
 POINT p_pieza = WORLD(100.0, 600.0, 200.0, 0.0, 0.0, 0.0)
-
-VAR pieza : INT = 1
 
 PROC soldar_pieza()
 MOVEJ p_home SPEED 80
 MOVEL p_pieza SPEED 50
-IF pieza == 1 THEN
-SET_OUT(Y10, ON)
-ELSE
-SET_OUT(Y11, ON)
-ENDIF
+SET_OUT(Y010, ON)
 WAIT 0.2s
-SET_OUT(Y10, OFF)
+SET_OUT(Y010, OFF)
 MOVEJ p_home SPEED 80
 ENDPROC
 
@@ -84,6 +85,8 @@ class MainWindow(QMainWindow):
         self.resize(1400, 860)
 
         self._program: Program | None = None
+        # Archivo abierto/guardado: de ahí sale el nombre del programa en el pad.
+        self._current_path: Path | None = None
         self._plc_io = PlcIoSimulator()
         self._thread: QThread | None = None
         self._worker: VmWorker | None = None
@@ -124,6 +127,13 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.bytecode_view, "Bytecode")
 
         self.tabs.addTab(self._build_points_tab(), "Puntos")
+
+        # Listado de lo que se exportó al pad, para revisarlo antes de llevarlo
+        # al robot.
+        self.pad_view = QPlainTextEdit()
+        self.pad_view.setReadOnly(True)
+        self.pad_view.setFont(QFont(MONOSPACE, 10))
+        self.tabs.addTab(self.pad_view, "Pad")
 
     def _build_points_tab(self) -> QWidget:
         container = QWidget()
@@ -259,6 +269,9 @@ class MainWindow(QMainWindow):
         self.act_stop.setShortcut(QKeySequence("Shift+F5"))
         self.act_stop.setEnabled(False)
 
+        self.act_export_pad = QAction(self._icon(sp.SP_DriveFDIcon), "E&xportar para el pad…", self)
+        self.act_export_pad.setShortcut(QKeySequence("Ctrl+E"))
+
         self.act_digitize = QAction(self._icon(sp.SP_ArrowDown), "&Digitalizar punto", self)
         self.act_digitize.setShortcut(QKeySequence("F8"))
         self.act_digitize.setEnabled(False)
@@ -278,6 +291,8 @@ class MainWindow(QMainWindow):
         m_program.addAction(self.act_compile)
         m_program.addAction(self.act_run)
         m_program.addAction(self.act_stop)
+        m_program.addSeparator()
+        m_program.addAction(self.act_export_pad)
 
         m_robot = bar.addMenu("&Robot")
         m_robot.addAction(self.act_digitize)
@@ -299,6 +314,7 @@ class MainWindow(QMainWindow):
         self.toolbar.addAction(self.act_compile)
         self.toolbar.addAction(self.act_run)
         self.toolbar.addAction(self.act_stop)
+        self.toolbar.addAction(self.act_export_pad)
         self.toolbar.addSeparator()
         self.toolbar.addAction(self.act_digitize)
 
@@ -320,6 +336,7 @@ class MainWindow(QMainWindow):
         self.act_compile.triggered.connect(self._on_compile)
         self.act_run.triggered.connect(self._on_run)
         self.act_stop.triggered.connect(self._on_stop)
+        self.act_export_pad.triggered.connect(self._on_export_pad)
         self.act_digitize.triggered.connect(self._on_digitize)
         self.act_about.triggered.connect(self._on_about)
 
@@ -353,6 +370,7 @@ class MainWindow(QMainWindow):
         if path:
             with open(path, encoding="utf-8") as f:
                 self.editor.setPlainText(f.read())
+            self._current_path = Path(path)
             self.messages.info(f"Abierto {path}", "archivo")
 
     def _on_save(self) -> None:
@@ -362,16 +380,18 @@ class MainWindow(QMainWindow):
         if path:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(self.editor.toPlainText())
+            self._current_path = Path(path)
             self.messages.info(f"Guardado {path}", "archivo")
 
     def _on_about(self) -> None:
         QMessageBox.about(
             self,
             "Acerca de Borunte DSL",
-            "Compilador y entorno para programar un robot Borunte a través de un "
-            "PLC Coolmay CX3G.\n\n"
-            "El nivel PLC todavía es propuesta sin confirmar contra hardware: ver "
-            "docs/INSTRUCTION_SET.md y el docstring de comms/plc_client.py.",
+            "Compilador y entorno para programar un robot Borunte. El programa se "
+            "exporta como respaldo del pad (HCBackupRobot_*.zip) y se importa por "
+            "pendrive.\n\n"
+            "El formato del respaldo está deducido, no confirmado por Borunte: ver "
+            "docs/PAD_FORMAT.md. Probá cada programa nuevo a velocidad baja.",
         )
 
     # -- compilar ---------------------------------------------------------------
@@ -408,17 +428,57 @@ class MainWindow(QMainWindow):
 
     def _warn_about_duplicate_points(self, program: Program) -> None:
         """La tabla de puntos no se deduplica: cada MOVEJ/MOVEL agrega una
-        entrada aunque mueva a un POINT ya declarado. No es un error de
-        corrección, pero se come los 333 lugares que tiene el PLC — así que
-        conviene decirlo, en vez de que haya que contar filas para notarlo."""
+        entrada aunque mueva a un POINT ya declarado. No cambia lo que se
+        exporta al pad (ahí cada movimiento lleva su punto adentro), pero
+        conviene saberlo al mirar la pestaña Puntos."""
         total = len(program.points)
         distintos = len({tuple(p.to_scaled_ints()) for p in program.points})
         if total > distintos:
             self.messages.warning(
                 f"La tabla de puntos tiene {total} entradas para {distintos} "
-                f"posiciones distintas (no se deduplica). En el PLC caben 333.",
+                f"posiciones distintas (no se deduplica).",
                 "compilador",
             )
+
+    # -- exportar al pad ----------------------------------------------------------
+
+    def pad_program_name(self) -> str:
+        """Nombre del programa en el pad: el del archivo, sin lo que el pad no
+        acepte. Sin archivo, uno fijo."""
+        if self._current_path is None:
+            return "BorunteDSL"
+        name = re.sub(r"[^A-Za-z0-9_.\-]", "_", self._current_path.stem)
+        return name or "BorunteDSL"
+
+    def export_to_pad(self, directory: str | Path) -> Path | None:
+        """Compila para el pad y escribe el respaldo en `directory`. Devuelve la
+        ruta, o None si no compiló (el error queda en la ventana de mensajes)."""
+        source = self.editor.toPlainText()
+        try:
+            backup = compile_to_pad(source, PadOptions(program_name=self.pad_program_name()))
+        except CompileError as e:
+            self.messages.error(f"No se puede exportar al pad: {e}", "pad")
+            self._show_messages_dock()
+            return None
+        except Exception as e:  # noqa: BLE001 — errores de parseo de Lark, etc.
+            self.messages.error(f"No se puede exportar al pad: {e}", "pad")
+            self._show_messages_dock()
+            return None
+
+        path = backup.write(directory)
+        self.pad_view.setPlainText("\n".join(list_backup(backup)))
+        self.tabs.setCurrentWidget(self.pad_view)
+        self.messages.info(
+            f"Exportado {path}. Copialo a la raíz de un pendrive e importalo desde el "
+            f"pad. El formato no está confirmado: probalo a velocidad baja.",
+            "pad",
+        )
+        return path
+
+    def _on_export_pad(self) -> None:
+        directory = QFileDialog.getExistingDirectory(self, "Carpeta donde guardar el respaldo")
+        if directory:
+            self.export_to_pad(directory)
 
     def _populate_points_table(self) -> None:
         assert self._program is not None

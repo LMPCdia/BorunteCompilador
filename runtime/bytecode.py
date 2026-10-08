@@ -1,11 +1,9 @@
 """
 Representación del bytecode en memoria (lado Python).
 
-Esto es el equivalente "en objetos" de la tabla de 8 words por instrucción
-descripta en docs/INSTRUCTION_SET.md. Cuando exista la VM real en el PLC,
-va a hacer falta un serializador que convierta esto a la codificación de
-registros D/R — pero para desarrollar y probar el compiler y la VM de
-referencia en software, esta representación alcanza y sobra.
+Es lo que ejecuta la VM de referencia (runtime/vm.py) para simular en la PC.
+Lo que va al robot es otra cosa: el respaldo del pad que genera
+compiler/pad_codegen.py.
 """
 
 from __future__ import annotations
@@ -38,10 +36,9 @@ END = "END"
 #
 # Hasta la v0.2 estos números vivían SOLO en la documentación: el compiler y la
 # VM de referencia trabajan con los nombres (strings), que es más legible para
-# debug. Pero para escribir el bytecode en los registros D del PLC hace falta el
-# número, así que la tabla tiene que existir en código. Si agregás un opcode al
-# contrato, agregalo también acá — hay un test que verifica que las dos listas
-# de opcodes coincidan.
+# debug. Los números se usaban para cargar el bytecode en el PLC (descartado);
+# quedan como identificadores estables. Si agregás un opcode, agregalo también
+# acá y en docs/INSTRUCTION_SET.md.
 OPCODE_NUMBERS: dict[str, int] = {
     NOP: 0x00,
     MOVEJ: 0x01,
@@ -73,7 +70,7 @@ class Instruction:
     b: int = 0
     c: int = 0
     d: int = 0
-    # metadata solo para debug/legibilidad (no existe en el PLC real)
+    # metadata solo para debug/legibilidad
     comment: str = ""
 
     def __repr__(self) -> str:  # pragma: no cover

@@ -127,16 +127,21 @@ def _self_test() -> int:
 
     paso("ejecutar un programa en la VM de referencia", ejecutar_programa_chico)
 
-    def verificar_cliente_plc():
-        # Importa pymodbus: si el empaquetado se lo dejó afuera, se ve acá y no
-        # recién cuando alguien intenta cargar el programa en el PLC.
-        from comms.plc_client import CoolmayPlcClient
-        from runtime.bytecode import Instruction
+    def exportar_al_pad():
+        # Lee pad/template.fnc, que es un archivo de datos como la gramática:
+        # si el empaquetado se lo dejó afuera, se ve acá y no recién cuando
+        # alguien exporta su primer programa.
+        from compiler.pad_codegen import compile_to_pad
+        from pad.backup import PadBackup
 
-        words = CoolmayPlcClient.encode_instruction(Instruction("SET_VAR", a=1, b=2))
-        assert len(words) == 8
+        backup = compile_to_pad(
+            "POINT casa = JOINT(0, 45, -45, 0, -75, 0)\nMOVEJ casa SPEED 10\nSET_OUT(Y010, ON)\n"
+        )
+        again = PadBackup.from_bytes(backup.to_bytes())
+        assert again.act.main[-1]["action"] == 60000, "el respaldo no termina en END"
+        assert again.others["fnc"], "falta pad/template.fnc"
 
-    paso("codificar bytecode para el PLC (importa pymodbus)", verificar_cliente_plc)
+    paso("generar un respaldo para el pad", exportar_al_pad)
 
     _emit()
     fallas = 0

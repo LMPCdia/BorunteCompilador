@@ -33,6 +33,11 @@ from typing import Any
 MAIN_LINE = 0
 MODULES_LINE = 10
 
+# `.fnc` del respaldo real analizado. Se usa al generar un respaldo nuevo si no
+# hay uno del robot propio para copiarlo (ver compiler/pad_codegen.py). Se lee
+# como archivo en tiempo de ejecución: tiene que viajar en el .exe.
+TEMPLATE_FNC = Path(__file__).resolve().parent / "template.fnc"
+
 # El pad solo reimporta zips con este nombre (reportado en el foro de RoboDK,
 # y coincide con el respaldo real que tenemos).
 BACKUP_NAME_RE = re.compile(r"HCBackupRobot_(\d{14})\.zip$")
