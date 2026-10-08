@@ -52,10 +52,11 @@ def _strip_newline(args: list) -> list:
 
 def _whole_number(value, keyword: str) -> int:
     number = float(value)
-    if not math.isfinite(number) or number != int(number) or not 0 <= number <= 65535:
+    if not math.isfinite(number) or number != int(number) or not 0 <= number <= 15:
         from compiler.codegen import CompileError
 
-        raise CompileError(f"{keyword} {value}: tiene que ser un número entero entre 0 y 65535")
+        raise CompileError(f"{keyword} {number:g}: tiene que ser un número entero entre 0 y 15 "
+                           f"(rango conservador: en el pad se vieron hasta el 2)")
     return int(number)
 
 
@@ -252,6 +253,14 @@ _TOKEN_NAMES = {
     "NEWLINE": "fin de línea", "LPAR": "«(»", "RPAR": "«)»", "COMMA": "«,»",
     "EQUAL": "«=»", "COLON": "«:»", "PLUS": "«+»", "MINUS": "«-»",
     "NAME": "un nombre", "SIGNED_NUMBER": "un número", "$END": "fin del archivo",
+    "S": "«s»",
+}
+
+# Palabras clave del lenguaje (siempre en mayúscula).
+_KEYWORDS = {
+    "POINT", "VAR", "TIMER", "PROC", "ENDPROC", "IF", "THEN", "ELSE", "ENDIF", "WAIT", "WAIT_IN",
+    "UNTIL", "MOVE_DONE", "SET_OUT", "SPEED", "MOVEJ", "MOVEL", "WORLD", "JOINT", "OFFSET",
+    "TOOL", "COORD", "ON", "OFF", "INT", "REAL", "BOOL",
 }
 
 
@@ -264,10 +273,37 @@ def _syntax_message(e: UnexpectedInput, source: str) -> str:
     if isinstance(e, UnexpectedCharacters):
         return f"{where}: carácter inesperado «{e.char}» en «{text}»"
     if isinstance(e, UnexpectedToken):
-        found = "fin de línea" if e.token.type == "NEWLINE" else f"«{e.token}»"
-        expected = sorted({_TOKEN_NAMES.get(t, f"«{t}»") for t in e.expected
-                           if not t.startswith("__")})[:6]
-        hint = f" Se esperaba: {', '.join(expected)}." if expected else ""
+        token = str(e.token)
+        found = "fin de línea" if e.token.type == "NEWLINE" else f"«{token}»"
+        history = getattr(e, "token_history", None) or []
+        previous = str(history[-1]) if history else ""
+        if previous and previous != previous.upper() and previous.upper() in _KEYWORDS:
+            return (f"{where}: «{previous}»: las palabras clave van en mayúscula "
+                    f"(«{previous.upper()}»).")
+        if previous in _KEYWORDS and e.token.type == "NEWLINE" and history[-1].type == "NAME":
+            return f"{where}: «{previous}» no va acá. ¿Sobra, o falta abrir el bloque (IF/PROC)?"
+        raw_line = source.splitlines()[line - 1] if line and line <= len(source.splitlines()) else ""
+        col = (getattr(e, "column", 0) or 0) - 1
+        after_digit = 0 < col <= len(raw_line) and raw_line[col - 1].isdigit()
+        if token == "," and "COMMA" not in e.expected and after_digit:
+            return f"{where}: los decimales van con punto, no con coma («{text}»)."
+        if e.expected == {"COMMA"} or (e.expected == {"COMMA", "RPAR"} and token in _KEYWORDS):
+            return f"{where}: falta una coma «,» en «{text}»."
+        if "RPAR" in e.expected and e.token.type != "COMMA":
+            return f"{where}: falta cerrar un paréntesis «)» en «{text}»."
+        if token in _KEYWORDS:
+            # Una palabra clave donde no va: casi siempre falta cerrar un bloque.
+            extra = ""
+            if token in ("ENDPROC", "ELSE") or token == "ENDIF":
+                extra = " ¿Falta un ENDIF antes, o sobra este?"
+            return f"{where}: «{token}» no va acá («{text}»).{extra}"
+        if token.upper() in _KEYWORDS and token != token.upper():
+            return (f"{where}: «{token}»: las palabras clave van en mayúscula "
+                    f"(«{token.upper()}»).")
+        expected = {_TOKEN_NAMES.get(t, f"«{t}»") for t in e.expected if not t.startswith("__")}
+        if "«)»" in expected and e.token.type != "NEWLINE":
+            expected = {"«)»", "«,»"} & expected  # dentro de un paréntesis, lo que importa
+        hint = f" Se esperaba: {', '.join(sorted(expected)[:6])}." if expected else ""
         return f"{where}: no se esperaba {found} en «{text}».{hint}"
     return f"{where}: error de sintaxis en «{text}»"
 

@@ -61,7 +61,8 @@ Para el pad, lo que no sabemos expresar es un error de compilación claro:
   respaldo real: se exportan solo con **Programa → Permitir instrucciones sin
   confirmar en el pad** (en la simulación se permiten siempre).
 - `TOOL n` / `COORD n` cambian la herramienta y el sistema de coordenadas de
-  los movimientos que siguen; cada PROC arranca de nuevo con 0/0.
+  los movimientos que siguen; cada PROC arranca de nuevo con los valores de
+  exportación (0/0 desde la app), no hereda los del que lo llama.
 - Los errores dicen la línea; los avisos (lo que se descarta, como `WAIT
   UNTIL MOVE_DONE`) aparecen al exportar.
 - Los offsets de puntos (`p + OFFSET(...)`) se resuelven al compilar.

@@ -122,7 +122,7 @@ class PadOptions:
 
 
 def _check_tool_coord(value: int, word: str) -> int:
-    if not isinstance(value, int) or not 0 <= value <= MAX_TOOL_OR_COORD:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_TOOL_OR_COORD:
         raise CompileError(
             f"{word} {value}: tiene que ser un número entero entre 0 y {MAX_TOOL_OR_COORD} "
             f"(rango conservador: en el pad se vieron hasta el 2)"
@@ -213,6 +213,9 @@ class _Compiler:
     warnings: list[str] = field(default_factory=list)
     calls: dict[str, set[str]] = field(default_factory=dict)  # quién llama a quién
     proc_has_own_frames: dict[str, bool] = field(default_factory=dict)
+    # (llamado, herramienta, sistema) vigentes en cada llamada desde el principal
+    main_calls: list[tuple[str, int, int]] = field(default_factory=list)
+    main_warned = False
 
     def warn(self, stmt, message: str) -> None:
         line = getattr(stmt, "line", None)
@@ -274,8 +277,10 @@ class _Compiler:
         elif isinstance(stmt, (ToolStmt, CoordStmt)):
             self._emit_tool_coord(stmt, out)
         elif isinstance(stmt, MoveStmt):
+            self._warn_main_action(stmt, out)
             self._emit_move(stmt, out)
         elif isinstance(stmt, SetOutStmt):
+            self._warn_main_action(stmt, out)
             point = io_point(stmt.io_name, "Y")
             out.add(action=200, delay="0.000", isWaitInput=False, point=point,
                     pointStatus=stmt.state, type=0, valveID=point)
@@ -315,6 +320,13 @@ class _Compiler:
             )
         else:
             raise CompileError(f"Sentencia no soportada por el pad: {stmt!r}")
+
+    def _warn_main_action(self, stmt, out: _Builder) -> None:
+        if out.is_main and not self.main_warned:
+            self.main_warned = True
+            self.warn(stmt, "El principal del respaldo real solo llama módulos (no tiene "
+                            "movimientos ni salidas propias). Debería andar igual, pero si el pad "
+                            "lo rechaza, poné estas instrucciones dentro de un PROC.")
 
     def _emit_tool_coord(self, stmt, out: _Builder) -> None:
         word = "TOOL" if isinstance(stmt, ToolStmt) else "COORD"
@@ -408,6 +420,8 @@ class _Compiler:
             self.unverified(f"{out.name} llama a {stmt.name}(): en el respaldo real solo el "
                             f"programa principal llama módulos.")
         self.calls.setdefault(out.name, set()).add(stmt.name)
+        if out.is_main:
+            self.main_calls.append((stmt.name, out.tool, out.coord))
         out.add(action=20000, flag=-1, module=str(self.modules[stmt.name]))
 
     def _emit_proc(self, stmt: ProcDecl) -> None:
@@ -416,12 +430,17 @@ class _Compiler:
                 f"PROC {stmt.name}({', '.join(stmt.params)}): los módulos del pad no "
                 f"reciben parámetros"
             )
+        # Los POINT declarados adentro del PROC son locales: se restauran al salir.
+        outer_points = dict(self.points)
         body = _Builder(stmt.name, self.options.tool, self.options.coord)
         if self.options.tool or self.options.coord:
             # Como los módulos del respaldo real que usan otro sistema.
             body.add(action=800, coordID=self.options.coord)
             body.add(action=801, toolID=self.options.tool)
-        self.emit_block(stmt.body, body)
+        try:
+            self.emit_block(stmt.body, body)
+        finally:
+            self.points = outer_points
         body.add(action=20001)
         self.bodies[stmt.name] = body.actions
         self.proc_has_own_frames[stmt.name] = body.set_tool_coord or not body.has_moves
@@ -438,15 +457,19 @@ class _Compiler:
 
         for name in self.modules:
             visit(name, [name])
-        # PROC con movimientos que no fija su herramienta, llamado desde un
-        # programa que sí la cambió: probablemente se esperaba que la herede.
-        if main.set_tool_coord:
-            for callee in sorted(self.calls.get("MAIN", ())):
-                if not self.proc_has_own_frames.get(callee, True):
-                    self.warnings.append(
-                        f"{callee}() no fija TOOL/COORD y arranca con los de la exportación "
-                        f"({self.options.tool}/{self.options.coord}), no con los del programa "
-                        f"principal. Si tiene que usar otros, poné TOOL/COORD adentro del PROC.")
+        # PROC con movimientos que no fija su herramienta, llamado en un momento
+        # en que el principal usaba otra: probablemente se esperaba que la herede.
+        defaults = (self.options.tool, self.options.coord)
+        warned = set()
+        for callee, tool, coord in self.main_calls:
+            if (tool, coord) != defaults and callee not in warned \
+                    and not self.proc_has_own_frames.get(callee, True):
+                warned.add(callee)
+                self.warnings.append(
+                    f"{callee}() no fija TOOL/COORD y arranca con los de la exportación "
+                    f"({defaults[0]}/{defaults[1]}), no con los que el principal tenía al "
+                    f"llamarlo ({tool}/{coord}). Si tiene que usar otros, poné TOOL/COORD "
+                    f"adentro del PROC.")
 
 
 def _collect_modules(statements: list) -> dict[str, int]:
@@ -464,11 +487,16 @@ def _collect_modules(statements: list) -> dict[str, int]:
 def _check_template(template: PadBackup) -> None:
     """Solo se copia de la plantilla lo que en el respaldo real era "vacío":
     si ahí hay algo, sería código o configuración ajena al programa nuevo."""
+    def is_empty(i: int, line) -> bool:
+        if i == _UNKNOWN_LINE_10:
+            return line == {}
+        return (isinstance(line, list) and len(line) == 1 and isinstance(line[0], dict)
+                and line[0].get("action") == 60000)
+
     for i, line in enumerate(template.act.lines):
         if i in (MAIN_LINE, MODULES_LINE):
             continue
-        expected = {} if i == _UNKNOWN_LINE_10 else [a for a in line if a.get("action") == 60000]
-        if line != expected or (i != _UNKNOWN_LINE_10 and len(line) != 1):
+        if not is_empty(i, line):
             raise CompileError(
                 f"La plantilla tiene contenido en la línea {i + 1} del .act, que en el "
                 f"respaldo analizado estaba vacía. Exportá del pad un programa vacío y "

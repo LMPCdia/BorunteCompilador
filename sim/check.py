@@ -14,7 +14,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from compiler.pad_codegen import compile_to_pad, io_point
+from compiler.codegen import CompileError
+from compiler.pad_codegen import PadOptions, compile_to_pad_report, io_point
 from pad.backup import PadBackup
 from sim.kinematics import RobotModel
 from sim.pad_sim import SimResult, simulate
@@ -44,14 +45,25 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     path = Path(args.archivo)
-    if path.suffix.lower() == ".zip":
-        backup = PadBackup.read(path)
-    else:
-        backup = compile_to_pad(path.read_text(encoding="utf-8"))
-    inputs = {}
-    for item in args.input:
-        name, _, value = item.partition("=")
-        inputs[io_point(name, "X")] = value.strip() not in ("0", "OFF", "off", "")
+    try:
+        if path.suffix.lower() == ".zip":
+            backup = PadBackup.read(path)
+        else:
+            # Simular no tiene riesgo: se permite lo "sin confirmar".
+            backup, warnings = compile_to_pad_report(
+                path.read_text(encoding="utf-8"), PadOptions(allow_unverified=True))
+            for warning in warnings:
+                print(f"Aviso: {warning}")
+        inputs = {}
+        for item in args.input:
+            name, _, value = item.partition("=")
+            inputs[io_point(name.strip().upper(), "X")] = value.strip().upper() not in ("0", "OFF", "")
+    except CompileError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
+    except (OSError, ValueError) as e:
+        print(f"Error: no se pudo leer {path}: {e}", file=sys.stderr)
+        return 2
 
     result = simulate(backup, RobotModel.load(args.model), inputs)
     print("\n".join(format_result(result)))

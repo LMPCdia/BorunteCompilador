@@ -319,3 +319,50 @@ def test_check_cli(tmp_path, capsys):
     assert check_main([str(src)]) == 1
     out = capsys.readouterr().out
     assert "BRTIRUS1820A" in out and "fuera de rango" in out
+
+
+# --- segunda ronda de revisión ----------------------------------------------------
+
+
+def test_singularity_is_named_when_the_target_is_reachable(model):
+    start = [0, 30, 0, 90, -20, -90]
+    target = list(start)
+    target[4] = 20
+    src = (f"MOVEJ JOINT({', '.join(map(str, start))}) SPEED 50\n"
+           f"MOVEL {_world_of(model, target)} SPEED 20\n")
+    result = simulate(_pad(src), model)
+    errors = [i.message for i in result.issues if i.severity == "error"]
+    if errors:  # si el IK logra cruzarla, no hay error; si no, que diga por qué
+        assert "singularidad de muñeca" in errors[0] and "sí se alcanza" in errors[0]
+
+
+def test_unevaluated_moves_say_why(model):
+    src = (f"MOVEJ {JHOME} SPEED 50\nTOOL 2\nMOVEL {_world_of(model, HOME)} SPEED 20\n"
+           f"TOOL 0\nMOVEL {_world_of(model, HOME, dz=-50)} SPEED 20\n")
+    result = simulate(_pad(src), model)
+    [unevaluated] = [i for i in result.issues if "sin evaluar" in i.message]
+    assert "herramienta/coordenadas sin cargar" in unevaluated.message
+
+
+def test_recovery_is_a_zero_time_jump_not_a_movement(model):
+    reachable = _world_of(model, HOME, dz=-100)
+    src = (f"MOVEJ {JHOME} SPEED 50\nMOVEL WORLD(1700, 0, 300, 180, 0, 0) SPEED 20\n"
+           f"MOVEL {reachable} SPEED 20\n")
+    result = simulate(_pad(src), model)
+    jumps = [s for s in result.segments if s.kind == "SALTO"]
+    for jump in jumps:
+        assert jump.duration_s == 0 and len(jump.samples) == 2
+
+
+def test_check_cli_accepts_unverified_forms_and_lowercase_inputs(tmp_path, capsys):
+    src = tmp_path / "p.krlb"
+    src.write_text("PROC p()\nWAIT 1s\nENDPROC\nIF X012 == 1 THEN\np()\nENDIF\n", encoding="utf-8")
+    assert check_main([str(src), "--input", "x012=1"]) == 0
+    assert "1.0 s" in capsys.readouterr().out
+
+
+def test_check_cli_reports_compile_errors_without_traceback(tmp_path, capsys):
+    src = tmp_path / "p.krlb"
+    src.write_text("MOVEJ nada SPEED 10\n", encoding="utf-8")
+    assert check_main([str(src)]) == 2
+    assert "Línea 1" in capsys.readouterr().err

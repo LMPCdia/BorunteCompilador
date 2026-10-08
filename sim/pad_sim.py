@@ -46,7 +46,6 @@ COMMENT, LABEL, END = 50000, 59999, 60000
 # Saltos de un eje entre dos muestras de un MOVEL que delatan una
 # singularidad (la muñeca "da la vuelta").
 JUMP_THRESHOLD_DEG = 20.0
-WRIST_SINGULAR_DEG = 5.0
 LINEAR_STEP_MM = 25.0
 LINEAR_STEP_DEG = 5.0
 # Presupuestos: un programa que no los respeta se corta con un aviso, nunca
@@ -143,8 +142,10 @@ class PadSimulator:
         self._missing_tools: set[int] = set()
         self._missing_frames: set[int] = set()
         self._unknown: dict[int, list[str]] = {}
-        self._unevaluated: list[str] = []      # MOVEL sin evaluar por pose desconocida
-        self._lost_reason = "no se conoce la pose inicial (el programa no empieza con MOVEJ)"
+        # MOVEL sin evaluar por pose desconocida, agrupados por causa
+        self._unevaluated: dict[str, list[str]] = {}
+        self._lost_reason = "el programa no empieza con un MOVEJ (no se conoce la pose inicial)"
+        self._elapsed = 0.0  # suma de duraciones (evita recalcularla en cada aviso)
         self._seen_jumps: set = set()
         self._last_known: list[float] = list(self.q) if self.q else [0.0] * 6  # para dibujar
 
@@ -169,7 +170,11 @@ class PadSimulator:
     # -- avisos -----------------------------------------------------------------
 
     def _issue(self, severity: str, where: str, message: str) -> None:
-        self._result.issues.append(Issue(severity, where, message, self._result.total_time_s))
+        self._result.issues.append(Issue(severity, where, message, self._elapsed))
+
+    def _add_segment(self, segment: Segment) -> None:
+        self._result.segments.append(segment)
+        self._elapsed += segment.duration_s
 
     def _summarize(self) -> None:
         r = self._result
@@ -185,11 +190,12 @@ class PadSimulator:
                 "aviso", "programa",
                 f"Falta cargar {' y '.join(missing)} (valores del pad, pestañas Herramientas y "
                 f"Coordenadas): los MOVEL que las usan no se simularon."))
-        if self._unevaluated:
+        for reason, wheres in self._unevaluated.items():
             r.issues.append(Issue(
-                "aviso", self._unevaluated[0],
-                f"{len(self._unevaluated)} MOVEL sin evaluar porque no se sabía dónde estaba el "
-                f"robot (el primero en {self._unevaluated[0]}). Se retoma en el próximo MOVEJ."))
+                "aviso", wheres[0],
+                f"{len(wheres)} MOVEL sin evaluar porque no se sabía dónde estaba el robot "
+                f"después de {reason} (el primero en {wheres[0]}). Se retoma en el próximo "
+                f"MOVEJ."))
         for code, wheres in self._unknown.items():
             r.issues.append(Issue(
                 "aviso", wheres[0], f"Acción {code} desconocida ({len(wheres)} vez/veces): no se simula"))
@@ -215,8 +221,8 @@ class PadSimulator:
         if key in self._seen_jumps:
             self._issue("info", where,
                         f"El programa vuelve a la etiqueta {flag} en la misma situación: es un "
-                        f"bucle (se repite indefinidamente con estas entradas). Se simuló una "
-                        f"vuelta.")
+                        f"bucle (se repite indefinidamente con estas entradas). La simulación "
+                        f"se corta acá.")
             raise _Stop
         self._seen_jumps.add(key)
         return pc
@@ -240,7 +246,7 @@ class PadSimulator:
                 self._wait(action, where)
             elif code == SET_OUT:
                 self._result.outputs.append(
-                    (self._result.total_time_s, action["point"], bool(action["pointStatus"])))
+                    (self._elapsed, action["point"], bool(action["pointStatus"])))
             elif code == IF_INPUT_GOTO:
                 state = self.inputs.get(action["point"], False)
                 if state == bool(action["pointStatus"]):
@@ -276,7 +282,7 @@ class PadSimulator:
             self._issue("aviso", where, f"WAIT negativo ({seconds}): se simula como 0 s")
             seconds = 0.0
         q = list(self.q) if self.q is not None else list(self._last_known)
-        self._result.segments.append(Segment("WAIT", where, [q], seconds, times=[0.0]))
+        self._add_segment(Segment("WAIT", where, [q], seconds, times=[0.0]))
 
     # -- movimientos ------------------------------------------------------------------
 
@@ -305,12 +311,12 @@ class PadSimulator:
             if self.q is None:
                 # Primer MOVEJ: el robot se ubica ahí (no se sabe de dónde viene).
                 r.start_deg = list(target)
-                r.segments.append(Segment("MOVEJ", where, [list(target)], 0.0, name,
+                self._add_segment(Segment("MOVEJ", where, [list(target)], 0.0, name,
                                           tool if tool in self.tools else 0, [0.0]))
             else:
                 samples = self._joint_path(self.q, target)
                 times = self._times(samples, speed)
-                r.segments.append(Segment("MOVEJ", where, samples, times[-1], name,
+                self._add_segment(Segment("MOVEJ", where, samples, times[-1], name,
                                           tool if tool in self.tools else 0, times))
             self.q = list(target)
             self._last_known = list(target)
@@ -326,19 +332,19 @@ class PadSimulator:
             missing = True
         if missing:
             r.skipped_moves += 1
-            self._lose(f"un MOVEL sin herramienta/coordenadas cargadas ({where})")
+            self._lose(f"un MOVEL con herramienta/coordenadas sin cargar ({where})")
             return
         if self.q is None:
             r.skipped_moves += 1
-            self._unevaluated.append(where)
+            self._unevaluated.setdefault(self._lost_reason, []).append(where)
             return
         target_tcp = mat_mul(self.frames[coord], pose_matrix(*values))
         samples, failed = self._linear_path(target_tcp, self.tools[tool], where)
         times = self._times(samples, speed)
-        r.segments.append(Segment("MOVEL", where, samples, times[-1], name, tool, times, failed))
+        self._add_segment(Segment("MOVEL", where, samples, times[-1], name, tool, times, failed))
         if failed:
             r.skipped_moves += 1
-            self._recover(mat_mul(target_tcp, invert(self.tools[tool])), where)
+            self._recover(mat_mul(target_tcp, invert(self.tools[tool])), where, samples[-1])
         else:
             self.q = samples[-1]
         self._last_known = list(samples[-1])
@@ -347,22 +353,27 @@ class PadSimulator:
         self.q = None
         self._lost_reason = reason
 
-    def _recover(self, target_flange: Matrix, where: str) -> None:
+    def _recover(self, target_flange: Matrix, where: str, last: list[float]) -> None:
         """Después de un MOVEL fallido: seguir desde el destino si alguna
         configuración llega, para no encadenar errores falsos."""
         seeds = [self.q] + [
             [s[0], s[1], s[2], s[3] + d4, s[4] * k, s[5] + d6]
             for s in [self.q] for d4, d6, k in ((180, 180, -1), (-180, -180, -1), (90, 0, 1), (-90, 0, 1))
         ]
-        for seed in seeds:
+        for n, seed in enumerate(seeds):
             q = self.model.ik(target_flange, seed)
             if q is not None:
                 q = self.model.wrap_into_limits(q, seed)
                 if not self.model.out_of_limits(q):
                     self.q = q
                     self._last_known = list(q)
-                    self._issue("info", where, "Se sigue simulando desde el destino de este "
-                                               "MOVEL (con otra configuración del brazo).")
+                    how = "" if n == 0 else " con otra configuración del brazo"
+                    self._issue("info", where, f"Se sigue simulando desde el destino de este "
+                                               f"MOVEL{how}: en la animación el robot salta "
+                                               f"ahí sin recorrido.")
+                    # Salto sin tiempo ni trayectoria: no es un movimiento real.
+                    self._add_segment(Segment("SALTO", where, [list(last), list(q)], 0.0,
+                                              times=[0.0, 0.0]))
                     return
         self._lose(f"el MOVEL fallido en {where}")
 
@@ -386,11 +397,18 @@ class PadSimulator:
             tcp = [r[0] + [p[0]], r[1] + [p[1]], r[2] + [p[2]], [0.0, 0.0, 0.0, 1.0]]
             nq = self.model.ik(mat_mul(tcp, tool_inv), q)
             if nq is None:
-                if abs(q[4]) < WRIST_SINGULAR_DEG:
-                    why = (f"singularidad de muñeca (J5 ≈ {q[4]:.1f}°): J4 y J6 tendrían que "
-                           f"girar de golpe")
+                # ¿El destino se alcanza? Entonces el problema es el camino: casi
+                # siempre la muñeca pasando por J5 = 0.
+                end = self.model.ik(mat_mul(target_tcp, tool_inv), q) or self.model.ik(
+                    mat_mul(target_tcp, tool_inv), [q[0], q[1], q[2], q[3] + 90, -q[4], q[5]])
+                if end is not None and (abs(q[4]) < 15 or end[4] * q[4] < 0):
+                    why = (f"la recta pasa por la singularidad de muñeca (J5 ≈ 0°; J4 y J6 "
+                           f"tendrían que girar de golpe). El destino sí se alcanza: probá un "
+                           f"MOVEJ o un punto intermedio")
+                elif end is not None:
+                    why = "la recta pasa por donde el brazo no llega (el destino sí se alcanza)"
                 else:
-                    why = "fuera de alcance, o la recta pasa por donde el brazo no llega"
+                    why = "el destino está fuera de alcance"
                 self._issue("error", where, f"MOVEL inalcanzable al {t:.0%} del recorrido: {why}")
                 return samples, True
             # Sin "acomodar la vuelta" (wrap_into_limits): dentro de una recta

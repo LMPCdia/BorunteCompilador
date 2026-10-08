@@ -406,3 +406,53 @@ def test_tool_and_coord_are_ignored_by_the_reference_vm():
 def test_timer_is_reported_as_not_exported():
     _, warnings = compile_to_pad_report("TIMER t = 2s\n")
     assert any("TIMER" in w for w in warnings)
+
+
+# --- segunda ronda de revisión ----------------------------------------------------
+
+
+@pytest.mark.parametrize("src, hint", [
+    ("PROC p()\nIF X010 == 0 THEN\nWAIT 1s\nENDPROC\n", "¿Falta un ENDIF antes"),
+    ("ENDIF\n", "«ENDIF» no va acá"),
+    ("movej JOINT(0,0,0,0,0,0) SPEED 10\n", "van en mayúscula"),
+    ("WAIT 1,5 s\n", "decimales van con punto"),
+    ("MOVEJ JOINT(0,0,0,0,0,0 SPEED 10\n", "falta cerrar un paréntesis"),
+    ("SET_OUT(Y010 ON)\n", "falta una coma"),
+])
+def test_syntax_errors_give_a_useful_hint(src, hint):
+    with pytest.raises(CompileError, match=hint):
+        compile_to_pad(src)
+
+
+def test_points_declared_inside_a_proc_are_local():
+    src = "PROC A()\nPOINT q = JOINT(0,0,0,0,0,0)\nMOVEJ q SPEED 10\nENDPROC\nMOVEJ q SPEED 10\n"
+    with pytest.raises(CompileError, match="Línea 5: Punto no definido"):
+        compile_to_pad(src)
+
+
+def test_inherit_warning_only_when_the_call_happens_with_other_tool():
+    proc = PIEZA + "PROC P()\nMOVEL pieza SPEED 10\nENDPROC\n"
+    _, before = compile_to_pad_report(proc + "P()\nTOOL 2\nMOVEL pieza SPEED 10\n")
+    assert not any("P() no fija" in w for w in before)
+    _, after = compile_to_pad_report(proc + "TOOL 2\nP()\n")
+    assert any("P() no fija" in w and "(2/0)" in w for w in after)
+
+
+def test_moves_in_main_get_one_warning():
+    _, warnings = compile_to_pad_report(HOME + "MOVEJ casa SPEED 10\nMOVEJ casa SPEED 10\n")
+    assert sum("solo llama módulos" in w for w in warnings) == 1
+
+
+def test_bool_is_not_a_tool_number():
+    with pytest.raises(CompileError, match="número entero"):
+        compile_to_pad("WAIT 1s\n", PadOptions(tool=True))
+
+
+def test_malformed_template_is_a_compile_error():
+    template = compile_to_pad(HOME + "MOVEJ casa SPEED 10\n")
+    template.act.lines[3] = {"no": "es una lista"}
+    with pytest.raises(CompileError, match="línea 4"):
+        compile_to_pad(FULL, PadOptions(template=template))
+    template.act.lines[3] = [1, 2, 3]
+    with pytest.raises(CompileError, match="línea 4"):
+        compile_to_pad(FULL, PadOptions(template=template))
