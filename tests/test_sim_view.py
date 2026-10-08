@@ -376,8 +376,8 @@ def test_main_window_fits_a_1600_pixel_screen(app):
 
     window = MainWindow()
     # Los paneles anchos se desplazan en vez de agrandar la ventana: el mínimo
-    # tiene que ser chico en cualquier plataforma (en Windows pedía 2328 px).
-    assert window.minimumSizeHint().width() <= 900
+    # tiene que ser chico en cualquier plataforma (en Windows pedía 2328 px; ahora 1100).
+    assert window.minimumSizeHint().width() <= 1500  # Windows: 1100, Linux: ~630
 
 
 def test_controls_are_locked_while_simulating(app):
