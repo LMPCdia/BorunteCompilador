@@ -21,7 +21,7 @@ from pathlib import Path
 # Paquetes de la aplicación que pueden contener archivos de datos.
 # `plc_vm/` queda afuera a propósito: es documentación y pseudocódigo para
 # escribir a mano en GX Developer, no se ejecuta (ver CLAUDE.md, regla 2).
-PACKAGE_DIRS = ("compiler", "comms", "runtime", "gui")
+PACKAGE_DIRS = ("compiler", "comms", "runtime", "gui", "pad")
 
 # Extensiones que son código, no datos.
 CODE_SUFFIXES = frozenset({".py", ".pyc", ".pyo", ".pyd"})

@@ -154,6 +154,8 @@ comms/       robot_client.py (robot), plc_client.py (PLC CX3G),
              robot_simulator.py + fake_modbus.py (para probar sin hardware)
 runtime/     bytecode.py (Instruction/Program/opcodes), vm.py (VM de
              referencia), plc_io_simulator.py (E/S simulada del PLC)
+pad/         backup.py (leer/escribir HCBackupRobot_*.zip del pad),
+             listing.py (listado legible) — ver docs/PAD_FORMAT.md
 gui/         main_window.py + paneles (project_tree, properties_panel,
              message_window, work_fields, connection_panel,
              syntax_highlighter), vm_worker.py, app.py (--self-test)
@@ -162,7 +164,7 @@ plc_vm/      SOLO documentación — la VM real se escribe a mano en
              GX Developer/Works2 una vez validado el contrato con hardware
 tests/
 docs/        ARCHITECTURE.md, MODBUS_REGISTER_MAP.md, INSTRUCTION_SET.md,
-             SIMULATION.md
+             SIMULATION.md, PAD_FORMAT.md
 ```
 
 ## Próximos pasos sugeridos, en orden
