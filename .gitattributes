@@ -1,0 +1,5 @@
+# Archivos que se copian tal cual dentro de los respaldos del pad: el pad los
+# escribe con saltos de línea "\n" de Linux. Sin esto, git en Windows los
+# convierte a "\r\n" al hacer checkout y el .exe generaría respaldos distintos
+# de los que escribe el pad.
+pad/template.fnc -text

@@ -96,6 +96,16 @@ def test_backup_survives_a_zip_roundtrip_and_has_every_file():
     assert again.act.dumps() == backup.act.dumps()
 
 
+def test_template_fnc_keeps_the_pad_line_endings():
+    # Si falla en Windows: falta `pad/template.fnc -text` en .gitattributes y
+    # git convirtió el archivo a "\r\n" al hacer checkout.
+    from pad.backup import TEMPLATE_FNC
+
+    data = TEMPLATE_FNC.read_bytes()
+    assert b"\r" not in data
+    assert data.endswith(b"\n")
+
+
 def test_template_lines_and_files_are_copied():
     template = compile_to_pad(HOME + "MOVEJ casa SPEED 10\n")
     template.act.lines[9] = {"algo": 1}
