@@ -1,0 +1,44 @@
+# Construye dist/BorunteDSL.exe en un runner Windows y lo publica como
+# artefacto descargable (pestaña Actions -> la corrida -> "Artifacts").
+#
+# Usa el mismo packaging/build_exe.ps1 que se corre a mano, así que el
+# criterio de aceptación es el mismo: tests en verde + `--self-test` sobre el
+# binario ya construido. Si el self-test falla, no se sube nada.
+#
+# PyInstaller no compila cruzado: por eso esto corre en windows-latest y no
+# en Linux.
+
+name: Build .exe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, "claude/**"]
+    tags: ["v*"]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            packaging/requirements-build.txt
+
+      - name: Dependencias
+        run: python -m pip install -r requirements.txt
+
+      - name: Tests + PyInstaller + self-test
+        shell: pwsh
+        run: .\packaging\build_exe.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BorunteDSL-exe
+          path: dist/BorunteDSL.exe
+          if-no-files-found: error

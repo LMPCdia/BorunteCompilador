@@ -125,6 +125,13 @@ python -m gui.app --self-test
 
 ## Construir el ejecutable
 
+**Sin Windows a mano:** cada push a `main` o a una rama `claude/**` (o
+"Run workflow" en la pestaña Actions) dispara `.github/workflows/build-exe.yml`,
+que corre este mismo script en un runner Windows y deja `BorunteDSL.exe`
+descargable en *Actions → la corrida → Artifacts*.
+
+En una PC con Windows:
+
 ```powershell
 .\packaging\build_exe.ps1
 ```
