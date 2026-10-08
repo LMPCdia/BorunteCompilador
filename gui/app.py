@@ -138,6 +138,30 @@ def _self_test() -> int:
 
     paso("codificar bytecode para el PLC (importa pymodbus)", verificar_cliente_plc)
 
+    def ejecutar_en_el_plc_simulado():
+        # El otro camino completo: cargar el bytecode en un PLC (simulado) por
+        # Modbus y que lo ejecute ÉL. Es el modo en que el sistema va a funcionar
+        # de verdad, así que conviene que el ejecutable lo pruebe.
+        from comms.plc_client import CoolmayPlcClient, PlcVmState
+        from comms.plc_simulator import SimulatedCoolmayPlc
+        from compiler.codegen import compile_source
+
+        sim = SimulatedCoolmayPlc(tick_s=0.0)
+        plc = CoolmayPlcClient(host="sim", client=sim)
+        plc.connect()
+        programa = compile_source(
+            "VAR n : INT = 0\nn = n + 2\nIF n == 2 THEN\nSET_OUT(Y10, ON)\nENDIF\n"
+        )
+        plc.upload_program(programa)
+        plc.verify_program(programa)
+        plc.start()
+        assert sim.wait_until_done(10.0), "la VM del PLC no terminó"
+        assert sim.state == PlcVmState.FINISHED, f"quedó en {sim.state}"
+        assert sim.read_output(10) is True, "la VM del PLC no ejecutó el programa"
+        sim.shutdown()
+
+    paso("cargar y ejecutar en el PLC simulado", ejecutar_en_el_plc_simulado)
+
     _emit()
     fallas = 0
     for nombre, ok, detalle in pasos:

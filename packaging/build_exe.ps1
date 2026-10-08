@@ -41,8 +41,32 @@ Write-Host "`n=== Dependencias de build ===" -ForegroundColor Cyan
 & $python -m pip install -q -r (Join-Path $PSScriptRoot "requirements-build.txt")
 if ($LASTEXITCODE -ne 0) { throw "No se pudieron instalar las dependencias de build." }
 
+# Limpieza del workpath ANTES de invocar, y no con --clean.
+#
+# Con --clean, PyInstaller hace el rmtree el mismo, y si Windows le niega el
+# acceso a un solo directorio (un antivirus escaneando el arbol mientras lo
+# recorre alcanza) aborta el build entero con un PermissionError. Borrarlo desde
+# acá y tolerar el fallo deja que el build siga: un workpath sucio no rompe nada,
+# PyInstaller lo sobreescribe.
+$buildDir = Join-Path $root "build"
+if (Test-Path $buildDir) {
+    Write-Host "`nLimpiando $buildDir"
+    for ($intento = 1; $intento -le 3; $intento++) {
+        try {
+            Remove-Item -Recurse -Force $buildDir -ErrorAction Stop
+            break
+        } catch {
+            if ($intento -eq 3) {
+                Write-Host "  no se pudo borrar del todo; se construye igual: $($_.Exception.Message)" -ForegroundColor Yellow
+            } else {
+                Start-Sleep -Milliseconds 400
+            }
+        }
+    }
+}
+
 Write-Host "`n=== PyInstaller ===" -ForegroundColor Cyan
-& $python -m PyInstaller (Join-Path $PSScriptRoot "BorunteDSL.spec") --noconfirm --clean
+& $python -m PyInstaller (Join-Path $PSScriptRoot "BorunteDSL.spec") --noconfirm
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller fallo." }
 
 $exe = Join-Path $root "dist\BorunteDSL.exe"

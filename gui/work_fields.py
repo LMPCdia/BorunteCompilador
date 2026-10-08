@@ -34,14 +34,14 @@ PROGRAMACION = WorkField(
     # La conexión también va acá: ejecutar el programa la necesita, y mandar al
     # usuario a cambiar de campo solo para apretar "Conectar" es una molestia
     # sin razón.
-    visible_docks=("estructura", "campos", "propiedades", "conexion", "mensajes", "log"),
+    visible_docks=("estructura", "campos", "propiedades", "conexion", "plc", "mensajes", "log"),
 )
 
 PUESTA_EN_SERVICIO = WorkField(
     key="puesta_en_servicio",
     label="Puesta en servicio",
     description="Conectar el robot, digitalizar puntos y probar movimientos",
-    visible_docks=("campos", "conexion", "mensajes", "log"),
+    visible_docks=("campos", "conexion", "plc", "mensajes", "log"),
 )
 
 WORK_FIELDS = [PROGRAMACION, PUESTA_EN_SERVICIO]

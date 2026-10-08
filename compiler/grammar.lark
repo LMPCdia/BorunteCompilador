@@ -25,6 +25,8 @@ statement: point_decl
          | set_out_stmt
          | if_stmt
          | call_stmt
+         | base_stmt
+         | tool_stmt
 
 // --- Declaraciones -----------------------------------------------------
 
@@ -42,7 +44,14 @@ TYPE.2: "INT" | "REAL" | "BOOL"
 
 timer_decl: "TIMER" NAME "=" number "s" NEWLINE
 
-proc_decl: "PROC" NAME "(" [NAME ("," NAME)*] ")" NEWLINE proc_body "ENDPROC" NEWLINE
+// El encabezado de un PROC es O BIEN la lista de parametros de siempre, O BIEN
+// un id explicito para el backend .act: PROC HOME(id=1). El id es el numero de
+// entrada en la biblioteca de subprogramas del robot, y se asigna a mano.
+proc_decl: "PROC" NAME "(" [proc_header] ")" NEWLINE proc_body "ENDPROC" NEWLINE
+proc_header: proc_id
+           | proc_param_list
+proc_id: NAME "=" number
+proc_param_list: NAME ("," NAME)*
 proc_body: (statement | blank_line)*
 
 // --- Sentencias ----------------------------------------------------------
@@ -58,6 +67,10 @@ wait_time_stmt: "WAIT" number "s" NEWLINE
 
 set_out_stmt: "SET_OUT" "(" NAME "," STATE ")" NEWLINE
 STATE.2: "ON" | "OFF"
+
+// Coordenada de base y herramienta: acciones nativas 800 y 801 del robot.
+base_stmt: "BASE" number NEWLINE
+tool_stmt: "TOOL" number NEWLINE
 
 if_stmt: "IF" expr "THEN" NEWLINE then_block ("ELSE" NEWLINE else_block)? "ENDIF" NEWLINE
 then_block: (statement | blank_line)*
@@ -75,7 +88,12 @@ call_stmt: NAME "(" [expr ("," expr)*] ")" NEWLINE
 
 ?atom: NAME
      | signed_number
+     | input_expr
+     | STATE          -> state_const
      | "(" expr ")"
+
+// Estado de una entrada fisica del robot, para IF INPUT(X012) == ON THEN
+input_expr: "INPUT" "(" NAME ")"
 
 number: SIGNED_NUMBER
 signed_number: SIGNED_NUMBER

@@ -44,6 +44,7 @@ from comms.robot_client import Pose
 from compiler.codegen import CompileError, compile_source
 from gui.connection_panel import ConnectionPanel
 from gui.message_window import MessageWindow
+from gui.plc_panel import PlcPanel
 from gui.project_tree import POSE_AXIS_NAMES, ProjectTree
 from gui.properties_panel import PropertiesPanel
 from gui.syntax_highlighter import DslSyntaxHighlighter
@@ -217,6 +218,12 @@ class MainWindow(QMainWindow):
             self.connection_panel, Qt.DockWidgetArea.RightDockWidgetArea,
         )
 
+        self.plc_panel = PlcPanel()
+        self._add_dock(
+            "plc", "VM del PLC",
+            self.plc_panel, Qt.DockWidgetArea.RightDockWidgetArea,
+        )
+
         self.messages = MessageWindow()
         self._add_dock(
             "mensajes", "Ventana de mensajes",
@@ -284,7 +291,7 @@ class MainWindow(QMainWindow):
 
         # El menú Ventana se arma con los toggles que ya trae cada dock.
         self.menu_window = bar.addMenu("&Ventana")
-        for key in ("estructura", "campos", "propiedades", "conexion", "mensajes", "log"):
+        for key in ("estructura", "campos", "propiedades", "conexion", "plc", "mensajes", "log"):
             self.menu_window.addAction(self._docks[key].toggleViewAction())
 
         m_help = bar.addMenu("A&yuda")
@@ -330,6 +337,10 @@ class MainWindow(QMainWindow):
         self.project_tree.line_requested.connect(self._goto_line)
         self.project_tree.currentItemChanged.connect(
             lambda current, _previous: self.properties_panel.show_item(current)
+        )
+
+        self.plc_panel.message.connect(
+            lambda severidad, texto, origen: getattr(self.messages, severidad)(texto, origen)
         )
 
         self.work_fields.field_changed.connect(self._apply_work_field)
@@ -382,18 +393,21 @@ class MainWindow(QMainWindow):
             program = compile_source(source)
         except CompileError as e:
             self._program = None
+            self.plc_panel.set_program(None)
             self.messages.error(str(e), "compilador")
             self._show_messages_dock()
             self._refresh_action_states()
             return
         except Exception as e:  # noqa: BLE001 — errores de parseo de Lark, etc.
             self._program = None
+            self.plc_panel.set_program(None)
             self.messages.error(f"Error de sintaxis: {e}", "compilador")
             self._show_messages_dock()
             self._refresh_action_states()
             return
 
         self._program = program
+        self.plc_panel.set_program(program)
         self.bytecode_view.setPlainText(program.dump())
         self._populate_points_table()
         self.project_tree.rebuild(program, source)
@@ -625,6 +639,23 @@ class MainWindow(QMainWindow):
         can_digitize = self.connection_panel.is_connected() and not running
         self.act_digitize.setEnabled(can_digitize)
         self.digitize_btn.setEnabled(can_digitize)
+
+    def closeEvent(self, event) -> None:  # noqa: N802 (API de Qt)
+        """Cierra los hilos antes de que se vaya la ventana.
+
+        El panel del PLC tiene un hilo de poll corriendo. Si la ventana se
+        destruye con ese QThread vivo, Qt destruye el objeto C++ por debajo y el
+        proceso crashea al salir — el mismo problema que ya apareció con el
+        worker de la VM de referencia, y que en el cierre es peor porque parece
+        "se cerró raro" en vez de un error.
+        """
+        self.plc_panel.shutdown()
+        if self._worker is not None:
+            self._worker.stop()
+        if self._thread is not None:
+            self._thread.quit()
+            self._thread.wait(3000)
+        super().closeEvent(event)
 
     def _show_messages_dock(self) -> None:
         self._docks["mensajes"].setVisible(True)

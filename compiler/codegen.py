@@ -77,12 +77,20 @@ class CompileError(Exception):
     pass
 
 
-def _io_number(name: str) -> int:
-    """'X010' -> 10, 'Y10' -> 10. Simplificación v0.1/v0.2 — ver docstring de arriba."""
+def io_number(name: str) -> int:
+    """'X010' -> 10, 'Y10' -> 10.
+
+    Lo usan los dos backends (el de bytecode del PLC y el .act), así que vive
+    acá y es público.
+    """
     digits = "".join(c for c in name if c.isdigit())
     if not digits:
         raise CompileError(f"No se pudo interpretar el número de E/S en {name!r}")
     return int(digits)
+
+
+#: Alias interno histórico.
+_io_number = io_number
 
 
 def param_slot_name(proc: str, param: str) -> str:

@@ -5,10 +5,15 @@ Contiene lo que un colaborador nuevo necesitaría saber antes de tocar código.
 
 ## Qué es esto
 
-Lenguaje tipo KRL para programar un robot Borunte a través de un PLC Coolmay
-CX3G, vía Modbus. Arquitectura de 2 niveles — LEER PRIMERO:
-`docs/ARCHITECTURE.md`, después `docs/MODBUS_REGISTER_MAP.md`,
-`docs/INSTRUCTION_SET.md`, `docs/SIMULATION.md`.
+Lenguaje tipo KRL para programar un robot Borunte.
+
+**El backend de compilación PRIMARIO es `compiler/act_backend.py`**, que emite
+el formato nativo `.act` del robot. Modbus quedó reducido a lo que ya estaba
+documentado: orquestación remota del programa ya importado y coordinación con
+E/S de celda.
+
+LEER PRIMERO: `docs/ARCHITECTURE.md` y `docs/PAD_PROGRAM_FORMAT.md`, después
+`docs/MODBUS_REGISTER_MAP.md`, `docs/INSTRUCTION_SET.md`, `docs/SIMULATION.md`.
 
 No hay hardware físico disponible todavía. Todo se desarrolla y prueba
 contra `comms/robot_simulator.py`, un simulador en software cuyos supuestos
@@ -43,10 +48,17 @@ en `docs/SIMULATION.md`.
 
 ## Estado actual (ver también README.md, que puede estar más actualizado)
 
-**154 tests en verde.** Los de GUI necesitan `QT_QPA_PLATFORM=offscreen` si no
+**275 tests en verde.** Los de GUI necesitan `QT_QPA_PLATFORM=offscreen` si no
 hay display.
 
-- **Contrato v0.2** (`docs/INSTRUCTION_SET.md`): opcodes hasta `0x0F`, formato
+- **Backend `.act`** (`compiler/act_backend.py`, PRIMARIO) + lector
+  (`compiler/act_reader.py`). Compila el DSL al formato nativo del robot. El
+  formato salió de ingeniería inversa sobre un export real de 338 KB y está
+  documentado en `docs/PAD_PROGRAM_FORMAT.md`, con cada afirmación marcada como
+  confirmada o hipótesis. Restricciones del formato: sin `ELSE` (no hay salto
+  incondicional), `IF` solo sobre entradas físicas, sin variables internas,
+  `PROC` con id explícito y sin parámetros.
+- **Contrato v0.2** (`docs/INSTRUCTION_SET.md`, backend anterior del PLC): opcodes hasta `0x0F`, formato
   de 8 words con los 32 bits en **word bajo primero** del lado del PLC,
   calling convention de `PROC`, y el bloque de registros de control de la VM
   (`D0-D7`, handshake por `D3`, bases `D1000`/`D4000`).
@@ -65,6 +77,13 @@ hay display.
   proyecto (navega al código), propiedades (muestra el registro `D` destino),
   ventana de mensajes, campos de trabajo, resaltado de sintaxis con dos
   paletas, digitalización de puntos, y ejecutar/parar en un hilo aparte.
+- **`comms/plc_simulator.py`**: CX3G simulado que EJECUTA el bytecode. No es
+  el ladder (`plc_vm/` sigue sin código, regla 2) — es la especificación
+  ejecutable de lo que ese ladder tiene que hacer. Cada rama de su `_step()`
+  debería tener un equivalente en una red de ladder.
+- **Panel de la VM del PLC** (`gui/plc_panel.py` + `gui/plc_status_worker.py`,
+  Tarea E): carga el programa en el PLC y lo ejecuta ahí, con el poll del
+  estado en un hilo aparte.
 - **`packaging/`**: `.exe` de un solo archivo, con `--self-test` como criterio
   de aceptación.
 
@@ -89,17 +108,20 @@ hay display.
 6. **El resaltado necesita dos paletas.** Una sola pensada para fondo blanco
    queda ilegible sobre el tema oscuro de Windows. Hay un test de contraste
    WCAG 3.0:1.
+7. **No dar de baja un hilo de poll en cada operación: pausarlo.** Bajarlo deja
+   señales encoladas que se entregan cuando el worker ya fue recolectado, y Qt
+   toca un objeto C++ destruido. Ver `gui/plc_status_worker.py` y el
+   `is_idle()` que el panel espera antes de tocar el socket.
+8. **El `.act` tiene el `program` de la biblioteca codificado DOS veces**: es
+   un string con JSON adentro. Y el orden de ejecución es el del array, NO el
+   campo `insertedIndex` (ese es el orden en que el operario insertó las líneas
+   en el pad).
+9. **El exit code que reporta el shell de Bash acá no es confiable** (devuelve
+   127 con la salida completa y exit real 0). Si hace falta el código de salida
+   de verdad, medirlo con PowerShell + `Start-Process -Wait -PassThru`. Un
+   crash real se reconoce distinto: corta la salida a la mitad, sin resumen.
 
 ## Tareas priorizadas
-
-### Tarea E — Panel de la GUI para la VM del PLC (siguiente)
-
-`comms/plc_client.py` sabe cargar el programa, arrancarlo, pararlo y leer el
-Program Counter en vivo, pero **nadie lo usa**: hoy el "Ejecutar" de la barra
-corre la VM de referencia en la PC, no en el CX3G. Falta el panel que cargue el
-programa compilado y muestre PC + estado + banco de variables en vivo. El poll
-del estado va en un hilo aparte, como `gui/vm_worker.py`, no en el hilo de la
-UI.
 
 ### Tarea F — Deduplicar la tabla de puntos en el codegen
 
@@ -126,7 +148,7 @@ viven solo en memoria de la GUI y se pierden al cerrarla.
 ### Completadas
 
 Tarea A (codegen de dos pasadas), Tarea B (GUI v0.1), Tarea C (cliente del
-PLC), Tarea D (afinar la GUI).
+PLC), Tarea D (afinar la GUI), Tarea E (panel de la VM del PLC).
 
 ## Cómo correr todo
 
