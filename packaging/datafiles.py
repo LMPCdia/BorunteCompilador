@@ -19,7 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 
 # Paquetes de la aplicación que pueden contener archivos de datos.
-PACKAGE_DIRS = ("compiler", "comms", "runtime", "gui", "pad")
+PACKAGE_DIRS = ("compiler", "comms", "runtime", "gui", "pad", "sim")
 
 # Extensiones que son código, no datos.
 CODE_SUFFIXES = frozenset({".py", ".pyc", ".pyo", ".pyd"})

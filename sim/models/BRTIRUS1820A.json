@@ -1,0 +1,21 @@
+{
+  "name": "BRTIRUS1820A",
+  "notes": "Medidas del plano 'BASIC SIZE' del fabricante. Rangos y velocidades de la tabla 'Basic Parameters' (sin modelo indicado en la tabla: confirmar que es la del 1820A). Sentido de giro y cero de cada eje: hipótesis, ver docs/SIMULATOR.md.",
+  "reach_mm": 1731.5,
+  "geometry_mm": {
+    "d1": 494.6,
+    "a1": 170,
+    "a2": 730,
+    "a3": 100,
+    "d4": 825.5,
+    "d6": 154
+  },
+  "joints": [
+    {"min_deg": -165, "max_deg": 165, "max_speed_dps": 190, "sign": 1},
+    {"min_deg": -95, "max_deg": 70, "max_speed_dps": 173, "sign": 1},
+    {"min_deg": -85, "max_deg": 75, "max_speed_dps": 223, "sign": 1},
+    {"min_deg": -180, "max_deg": 180, "max_speed_dps": 254, "sign": 1},
+    {"min_deg": -115, "max_deg": 115, "max_speed_dps": 270, "sign": -1},
+    {"min_deg": -360, "max_deg": 360, "max_speed_dps": 342, "sign": 1}
+  ]
+}
