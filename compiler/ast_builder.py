@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from lark import Lark, Token, Transformer
+from lark.exceptions import VisitError
 
 from comms.robot_client import Pose
 from compiler.ast_nodes import (
@@ -17,16 +18,18 @@ from compiler.ast_nodes import (
     BinOp,
     CallStmt,
     Const,
+    CoordStmt,
     IfStmt,
     MoveStmt,
     PointDecl,
     PointLiteral,
-    PointOffset,
     PointName,
+    PointOffset,
     ProcDecl,
     SetOutStmt,
     SourceProgram,
     TimerDecl,
+    ToolStmt,
     VarDecl,
     VarRef,
     WaitInStmt,
@@ -38,6 +41,15 @@ GRAMMAR_PATH = Path(__file__).parent / "grammar.lark"
 
 def _strip_newline(args: list) -> list:
     return [a for a in args if not (isinstance(a, Token) and a.type == "NEWLINE")]
+
+
+def _whole_number(value, keyword: str) -> int:
+    number = float(value)
+    if number != int(number) or not 0 <= number <= 65535:
+        from compiler.codegen import CompileError
+
+        raise CompileError(f"{keyword} {value}: tiene que ser un número entero entre 0 y 65535")
+    return int(number)
 
 
 class _AstBuilder(Transformer):
@@ -153,6 +165,14 @@ class _AstBuilder(Transformer):
             return WaitTimeStmt(seconds=float(args[0]))
         return WaitTimeStmt(until_move_done=True)
 
+    def tool_stmt(self, args):
+        args = _strip_newline(args)
+        return ToolStmt(_whole_number(args[0], "TOOL"))
+
+    def coord_stmt(self, args):
+        args = _strip_newline(args)
+        return CoordStmt(_whole_number(args[0], "COORD"))
+
     def set_out_stmt(self, args):
         args = _strip_newline(args)
         name, state = args
@@ -217,4 +237,13 @@ def build_ast(source: str) -> SourceProgram:
     if source and not source.endswith("\n"):
         source += "\n"
     tree = parser.parse(source)
-    return _AstBuilder().transform(tree)
+    try:
+        return _AstBuilder().transform(tree)
+    except VisitError as e:
+        # Lark envuelve lo que tira el Transformer: un CompileError tiene que
+        # llegar como tal, con su mensaje, no como "Error trying to process...".
+        from compiler.codegen import CompileError
+
+        if isinstance(e.orig_exc, CompileError):
+            raise e.orig_exc from None
+        raise

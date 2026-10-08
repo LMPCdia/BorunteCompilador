@@ -1,7 +1,8 @@
 """
-Pestaña "Simulación 3D": compila el programa para el pad, lo simula sobre el
-modelo de robot elegido (`sim/`), lo anima, y permite armar el layout de la
-celda importando piezas STEP/STL/OBJ.
+Pestaña "Simulación 3D": simula sobre el modelo de robot elegido (`sim/`)
+el programa del editor o un respaldo del pad (`HCBackupRobot_*.zip`), lo
+anima, y arma la celda: piezas STEP/STL/OBJ, herramientas y sistemas de
+coordenadas del pad. Todo eso se guarda junto en un `.layout.json`.
 
 Todo menos la vista 3D funciona sin placa de video (y así se prueba). La vista
 se crea solo si hay OpenGL: ver el aviso en gui/viewport3d.py.
@@ -14,32 +15,38 @@ from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QLineEdit,
     QPushButton,
     QSlider,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from compiler.codegen import CompileError
 from compiler.pad_codegen import compile_to_pad, io_point
+from pad.backup import PadBackup
+from pad.listing import io_name
 from sim.kinematics import RobotModel, rot_axis
 from sim.meshes import Mesh, MeshError, load_mesh
-from sim.pad_sim import SimResult, simulate
+from sim.pad_sim import PadSimulator, SimResult, inputs_used
 from sim.scene import Layout, LayoutObject, Timeline, robot_link_meshes
 
 SLIDER_STEPS = 1000
 FRAME_MS = 33
 OBJECT_COLUMNS = ["Objeto", "X", "Y", "Z", "Giro Z°"]
+POSE_COLUMNS = ["N°", "X", "Y", "Z", "U", "V", "W"]
+PATH_COLORS = {"MOVEJ": (0.35, 0.75, 1.0), "MOVEL": (1.0, 0.85, 0.2)}
 
 Reporter = Callable[[str, str], None]  # (severidad "info"|"warning"|"error", mensaje)
 
@@ -60,6 +67,89 @@ def parse_inputs(text: str) -> dict[int, bool]:
     return inputs
 
 
+def _number(text: str) -> float:
+    return float(text.strip().replace(",", "."))
+
+
+class PoseTable(QWidget):
+    """Tabla editable "número -> X, Y, Z, U, V, W" (herramientas o sistemas
+    de coordenadas del pad)."""
+
+    def __init__(self, title: str, help_text: str, on_change: Callable[[], None],
+                 report: Reporter) -> None:
+        super().__init__()
+        self._on_change = on_change
+        self._report = report
+        self._loading = False
+        self.table = QTableWidget(0, len(POSE_COLUMNS))
+        self.table.setHorizontalHeaderLabels(POSE_COLUMNS)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.itemChanged.connect(self._edited)
+        add_btn = QPushButton("Agregar")
+        add_btn.clicked.connect(self.add_row)
+        remove_btn = QPushButton("Quitar")
+        remove_btn.clicked.connect(self._remove)
+        note = QLabel(help_text)
+        note.setWordWrap(True)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(title))
+        layout.addWidget(self.table, 1)
+        row = QHBoxLayout()
+        row.addWidget(add_btn)
+        row.addWidget(remove_btn)
+        layout.addLayout(row)
+        layout.addWidget(note)
+
+    def values(self) -> dict[int, list[float]]:
+        out = {}
+        for r in range(self.table.rowCount()):
+            try:
+                number = int(_number(self.table.item(r, 0).text()))
+                out[number] = [_number(self.table.item(r, c).text()) for c in range(1, 7)]
+            except (ValueError, AttributeError):
+                continue  # fila a medio escribir: se ignora hasta que esté completa
+        return out
+
+    def set_values(self, values: dict[int, list[float]]) -> None:
+        self._loading = True
+        self.table.setRowCount(0)
+        for number, pose in sorted(values.items()):
+            self._append([number, *pose])
+        self._loading = False
+
+    def add_row(self, number: int | None = None) -> None:
+        used = self.values()
+        if not isinstance(number, int):
+            number = max(used, default=0) + 1
+        self._loading = True
+        self._append([number, 0, 0, 0, 0, 0, 0])
+        self._loading = False
+        self._on_change()
+
+    def _append(self, row_values: list[float]) -> None:
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        for col, value in enumerate(row_values):
+            self.table.setItem(row, col, QTableWidgetItem(f"{value:g}"))
+
+    def _remove(self) -> None:
+        row = self.table.currentRow()
+        if row >= 0:
+            self.table.removeRow(row)
+            self._on_change()
+
+    def _edited(self, item: QTableWidgetItem) -> None:
+        if self._loading:
+            return
+        try:
+            _number(item.text())
+        except ValueError:
+            self._report("warning", f"«{item.text()}» no es un número")
+            return
+        self._on_change()
+
+
 class SimView(QWidget):
     def __init__(self, get_source: Callable[[], str], report: Reporter | None = None,
                  enable_3d: bool | None = None) -> None:
@@ -67,9 +157,13 @@ class SimView(QWidget):
         self._get_source = get_source
         self._report = report or (lambda _severity, _msg: None)
         self.layout_data = Layout()
+        self.layout_path: Path | None = None
+        self.backup: PadBackup | None = None      # respaldo abierto (None = editor)
+        self.backup_path: Path | None = None
         self.result: SimResult | None = None
         self.timeline: Timeline | None = None
         self.current_q: list[float] = [0.0] * 6
+        self._input_boxes: dict[int, QCheckBox] = {}
         self._mesh_cache: dict[str, Mesh] = {}
         self._t = 0.0
         self._updating_table = False
@@ -96,25 +190,41 @@ class SimView(QWidget):
         self.model_combo = QComboBox()
         self.model_combo.addItems(RobotModel.available())
         self.model_combo.currentTextChanged.connect(self.set_model)
-        self.inputs_edit = QLineEdit()
-        self.inputs_edit.setPlaceholderText("Entradas activas, ej.: X012=1, X013=0")
+        self.source_label = QLabel("Programa: el del editor")
+        open_backup_btn = QPushButton("Abrir respaldo del pad…")
+        open_backup_btn.clicked.connect(self._on_open_backup)
+        self.use_editor_btn = QPushButton("Usar el editor")
+        self.use_editor_btn.clicked.connect(self.use_editor)
+        self.use_editor_btn.setEnabled(False)
         self.simulate_btn = QPushButton("Simular")
         self.simulate_btn.clicked.connect(self.simulate)
-        self.play_btn = QPushButton("▶")
-        self.play_btn.setCheckable(True)
-        self.play_btn.toggled.connect(self._on_play_toggled)
-        self.slider = QSlider(Qt.Orientation.Horizontal)
-        self.slider.setRange(0, SLIDER_STEPS)
-        self.slider.valueChanged.connect(self._on_slider)
-        self.time_label = QLabel("—")
 
         top = QHBoxLayout()
         top.addWidget(QLabel("Robot:"))
         top.addWidget(self.model_combo)
-        top.addWidget(self.inputs_edit, 1)
+        top.addWidget(self.source_label, 1)
+        top.addWidget(open_backup_btn)
+        top.addWidget(self.use_editor_btn)
         top.addWidget(self.simulate_btn)
+
+        self.inputs_row = QHBoxLayout()
+        self.inputs_hint = QLabel("Entradas: (el programa no consulta ninguna)")
+        self.inputs_row.addWidget(self.inputs_hint)
+        self.inputs_row.addStretch(1)
+
+        self.play_btn = QPushButton("▶")
+        self.play_btn.setCheckable(True)
+        self.play_btn.toggled.connect(self._on_play_toggled)
+        self.speed_combo = QComboBox()
+        self.speed_combo.addItems(["x0.5", "x1", "x2", "x5", "x10"])
+        self.speed_combo.setCurrentText("x1")
+        self.slider = QSlider(Qt.Orientation.Horizontal)
+        self.slider.setRange(0, SLIDER_STEPS)
+        self.slider.valueChanged.connect(self._on_slider)
+        self.time_label = QLabel("—")
         bottom = QHBoxLayout()
         bottom.addWidget(self.play_btn)
+        bottom.addWidget(self.speed_combo)
         bottom.addWidget(self.slider, 1)
         bottom.addWidget(self.time_label)
 
@@ -129,6 +239,27 @@ class SimView(QWidget):
         self.summary = QLabel("Apretá «Simular» para simular el programa del editor.")
         self.summary.setWordWrap(True)
 
+        center = QWidget()
+        center_layout = QVBoxLayout(center)
+        center_layout.setContentsMargins(0, 0, 0, 0)
+        center_layout.addWidget(view, 1)
+        center_layout.addLayout(bottom)
+        center_layout.addWidget(self.summary)
+
+        splitter = QSplitter()
+        splitter.addWidget(center)
+        splitter.addWidget(self._build_side())
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([1000, 460])
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(top)
+        layout.addLayout(self.inputs_row)
+        layout.addWidget(splitter, 1)
+
+    def _build_side(self) -> QWidget:
+        # -- piezas --
         self.objects_table = QTableWidget(0, len(OBJECT_COLUMNS))
         self.objects_table.setHorizontalHeaderLabels(OBJECT_COLUMNS)
         header = self.objects_table.horizontalHeader()
@@ -141,39 +272,105 @@ class SimView(QWidget):
         import_btn.clicked.connect(self._on_import)
         remove_btn = QPushButton("Quitar")
         remove_btn.clicked.connect(self._on_remove)
-        open_btn = QPushButton("Abrir layout…")
+        objects = QWidget()
+        objects_layout = QVBoxLayout(objects)
+        objects_layout.addWidget(QLabel("Piezas (mm, respecto de la base del robot)"))
+        objects_layout.addWidget(self.objects_table, 1)
+        row = QHBoxLayout()
+        row.addWidget(import_btn)
+        row.addWidget(remove_btn)
+        objects_layout.addLayout(row)
+
+        # -- herramientas y coordenadas --
+        self.tools_table = PoseTable(
+            "Herramientas del pad (punta respecto de la brida)",
+            "Copiá los valores del menú de herramientas del pad. La 0 es la brida y no "
+            "hace falta cargarla.",
+            self._on_frames_changed, self._report)
+        self.frames_table = PoseTable(
+            "Sistemas de coordenadas del pad (respecto de la base)",
+            "Copiá los valores del menú de coordenadas del pad. El 0 es la base del "
+            "robot y no hace falta cargarlo.",
+            self._on_frames_changed, self._report)
+
+        tabs = QTabWidget()
+        tabs.addTab(objects, "Piezas")
+        tabs.addTab(self.tools_table, "Herramientas")
+        tabs.addTab(self.frames_table, "Coordenadas")
+        self.side_tabs = tabs
+
+        open_btn = QPushButton("Abrir celda…")
         open_btn.clicked.connect(self._on_open_layout)
-        save_btn = QPushButton("Guardar layout…")
+        save_btn = QPushButton("Guardar celda…")
         save_btn.clicked.connect(self._on_save_layout)
         side = QWidget()
         side_layout = QVBoxLayout(side)
-        side_layout.addWidget(QLabel("Layout de la celda (mm, respecto de la base del robot)"))
-        side_layout.addWidget(self.objects_table, 1)
-        row1, row2 = QHBoxLayout(), QHBoxLayout()
-        row1.addWidget(import_btn)
-        row1.addWidget(remove_btn)
+        side_layout.setContentsMargins(0, 0, 0, 0)
+        side_layout.addWidget(tabs, 1)
+        row2 = QHBoxLayout()
         row2.addWidget(open_btn)
         row2.addWidget(save_btn)
-        side_layout.addLayout(row1)
         side_layout.addLayout(row2)
+        return side
 
-        center = QWidget()
-        center_layout = QVBoxLayout(center)
-        center_layout.setContentsMargins(0, 0, 0, 0)
-        center_layout.addWidget(view, 1)
-        center_layout.addLayout(bottom)
-        center_layout.addWidget(self.summary)
+    # -- qué se simula ------------------------------------------------------------------
 
-        splitter = QSplitter()
-        splitter.addWidget(center)
-        splitter.addWidget(side)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([1000, 420])
+    def open_backup(self, path: str | Path) -> bool:
+        try:
+            self.backup = PadBackup.read(path)
+        except Exception as e:  # noqa: BLE001 — zip roto, otro formato, etc.
+            self._report("error", f"No se pudo abrir el respaldo: {e}")
+            return False
+        self.backup_path = Path(path)
+        self.source_label.setText(f"Programa: {self.backup.name} (respaldo del pad)")
+        self.use_editor_btn.setEnabled(True)
+        self._refresh_inputs(self.backup)
+        self._report("info", f"Abierto el respaldo {Path(path).name}: programa {self.backup.name}, "
+                             f"{len(self.backup.act.modules)} módulo(s).")
+        return True
 
-        layout = QVBoxLayout(self)
-        layout.addLayout(top)
-        layout.addWidget(splitter, 1)
+    def use_editor(self) -> None:
+        self.backup = None
+        self.backup_path = None
+        self.source_label.setText("Programa: el del editor")
+        self.use_editor_btn.setEnabled(False)
+
+    def _current_backup(self) -> PadBackup:
+        if self.backup is not None:
+            return self.backup
+        backup = compile_to_pad(self._get_source())
+        self._refresh_inputs(backup)
+        return backup
+
+    # -- entradas ---------------------------------------------------------------------
+
+    def _refresh_inputs(self, backup: PadBackup) -> None:
+        used = inputs_used(backup)
+        if used == sorted(self._input_boxes):
+            return
+        previous = self.inputs()
+        for box in self._input_boxes.values():
+            self.inputs_row.removeWidget(box)
+            box.deleteLater()
+        self._input_boxes = {}
+        self.inputs_hint.setText("Entradas activas:" if used else
+                                 "Entradas: (el programa no consulta ninguna)")
+        for i, point in enumerate(used):
+            box = QCheckBox(io_name("X", point))
+            box.setChecked(previous.get(point, False))
+            box.toggled.connect(self._on_input_toggled)
+            self.inputs_row.insertWidget(1 + i, box)
+            self._input_boxes[point] = box
+
+    def inputs(self) -> dict[int, bool]:
+        return {point: box.isChecked() for point, box in self._input_boxes.items()}
+
+    def set_input(self, name: str, state: bool) -> None:
+        self._input_boxes[io_point(name, "X")].setChecked(state)
+
+    def _on_input_toggled(self, _checked: bool) -> None:
+        if self.result is not None:
+            self.simulate()
 
     # -- modelo y simulación ------------------------------------------------------------
 
@@ -187,8 +384,7 @@ class SimView(QWidget):
     def simulate(self) -> SimResult | None:
         self.play_btn.setChecked(False)
         try:
-            backup = compile_to_pad(self._get_source())
-            inputs = parse_inputs(self.inputs_edit.text())
+            backup = self._current_backup()
         except CompileError as e:
             self._report("error", f"No se puede simular: {e}")
             self.summary.setText(f"No compila para el pad: {e}")
@@ -198,22 +394,58 @@ class SimView(QWidget):
             self.summary.setText(f"No compila: {e}")
             return None
 
-        self.result = simulate(backup, self.model, inputs)
+        QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            simulator = PadSimulator(self.model, self.inputs(),
+                                     tools=self.layout_data.tools, frames=self.layout_data.frames)
+            self.result = simulator.run(backup)
+        finally:
+            QGuiApplication.restoreOverrideCursor()
         self.timeline = Timeline(self.result)
+        self._draw_path(simulator)
+
         for issue in self.result.issues:
             severity = "error" if issue.severity == "error" else "warning"
             self._report(severity, f"[{self.model.name}] {issue.where}: {issue.message}")
         errores = sum(i.severity == "error" for i in self.result.issues)
         avisos = len(self.result.issues) - errores
+        moves = sum(s.kind in ("MOVEJ", "MOVEL") for s in self.result.segments)
         self.summary.setText(
-            f"{self.model.name}: tiempo de ciclo estimado {self.result.total_time_s:.1f} s "
-            f"(sin aceleraciones). {errores} error(es), {avisos} aviso(s). "
-            f"Modelo con hipótesis: ver docs/SIMULATOR.md."
+            f"{self.model.name}: {moves} movimiento(s) simulado(s), tiempo de ciclo estimado "
+            f"{self.result.total_time_s:.1f} s (sin aceleraciones). {errores} error(es), "
+            f"{avisos} aviso(s) — detalle en la ventana de mensajes. Modelo con hipótesis: "
+            f"ver docs/SIMULATOR.md."
         )
-        self._report("info", f"Simulación en {self.model.name}: "
+        self._report("info", f"Simulación en {self.model.name}: {moves} movimiento(s), "
                              f"{self.result.total_time_s:.1f} s, {errores} error(es), {avisos} aviso(s).")
         self.set_time(0.0)
         return self.result
+
+    def _draw_path(self, simulator: PadSimulator) -> None:
+        if self.viewport is None or self.result is None:
+            return
+        points, colors = [], []
+        for seg in self.result.segments:
+            if seg.kind not in PATH_COLORS:
+                continue
+            for q in seg.samples:
+                points.append(simulator.tcp(q, seg.tool))
+                colors.append(PATH_COLORS[seg.kind])
+        self.viewport.set_path(points, colors)
+
+    # -- herramientas y coordenadas -------------------------------------------------------
+
+    def _on_frames_changed(self) -> None:
+        self.layout_data.tools = self.tools_table.values()
+        self.layout_data.frames = self.frames_table.values()
+
+    def set_tool(self, number: int, pose: list[float]) -> None:
+        self.layout_data.tools[number] = list(pose)
+        self.tools_table.set_values(self.layout_data.tools)
+
+    def set_frame(self, number: int, pose: list[float]) -> None:
+        self.layout_data.frames[number] = list(pose)
+        self.frames_table.set_values(self.layout_data.frames)
 
     # -- animación ---------------------------------------------------------------------
 
@@ -223,7 +455,7 @@ class SimView(QWidget):
         self._t = max(0.0, min(t, self.timeline.duration))
         q, where = self.timeline.at(self._t)
         self.show_pose(q)
-        self.time_label.setText(f"{self._t:5.1f} / {self.timeline.duration:.1f} s  {where}")
+        self.time_label.setText(f"{self._t:6.1f} / {self.timeline.duration:.1f} s  {where}")
         if self.timeline.duration > 0:
             self.slider.blockSignals(True)
             self.slider.setValue(round(self._t / self.timeline.duration * SLIDER_STEPS))
@@ -251,15 +483,20 @@ class SimView(QWidget):
         if self.timeline is None:
             self.play_btn.setChecked(False)
             return
-        self.set_time(self._t + FRAME_MS / 1000)
+        factor = float(self.speed_combo.currentText().lstrip("x"))
+        self.set_time(self._t + FRAME_MS / 1000 * factor)
         if self._t >= self.timeline.duration:
             self.play_btn.setChecked(False)
 
-    # -- layout ---------------------------------------------------------------------------
+    # -- piezas ---------------------------------------------------------------------------
 
     def _mesh_for(self, path: str) -> Mesh:
         if path not in self._mesh_cache:
-            self._mesh_cache[path] = load_mesh(path)
+            QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                self._mesh_cache[path] = load_mesh(path)
+            finally:
+                QGuiApplication.restoreOverrideCursor()
         return self._mesh_cache[path]
 
     def import_object(self, path: str | Path) -> LayoutObject | None:
@@ -281,12 +518,22 @@ class SimView(QWidget):
     def load_layout(self, path: str | Path) -> None:
         layout = Layout.load(path)
         self.layout_data = layout
+        self.layout_path = Path(path)
         if layout.model in RobotModel.available():
             self.model_combo.setCurrentText(layout.model)
+        else:
+            self._report("warning", f"La celda usa el modelo {layout.model}, que no está "
+                                    f"instalado: se usa {self.model_combo.currentText()}.")
+            self.layout_data.model = self.model_combo.currentText()
+        self.tools_table.set_values(layout.tools)
+        self.frames_table.set_values(layout.frames)
         self._refresh_objects()
 
     def save_layout(self, path: str | Path) -> None:
+        self.layout_data.tools = self.tools_table.values()
+        self.layout_data.frames = self.frames_table.values()
         self.layout_data.save(path)
+        self.layout_path = Path(path)
 
     def _refresh_objects(self) -> None:
         self._updating_table = True
@@ -315,10 +562,18 @@ class SimView(QWidget):
             obj.name = item.text()
             return
         try:
-            setattr(obj, field, float(item.text().replace(",", ".")))
+            setattr(obj, field, _number(item.text()))
         except ValueError:
             self._report("warning", f"«{item.text()}» no es un número")
         self._refresh_objects()
+
+    # -- diálogos -------------------------------------------------------------------------
+
+    def _on_open_backup(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Abrir respaldo del pad", filter="Respaldo del pad (*.zip)")
+        if path and self.open_backup(path):
+            self.simulate()
 
     def _on_import(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -333,11 +588,13 @@ class SimView(QWidget):
             self._refresh_objects()
 
     def _on_open_layout(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Abrir layout", filter="Layout (*.layout.json *.json)")
+        path, _ = QFileDialog.getOpenFileName(self, "Abrir celda", filter="Celda (*.layout.json *.json)")
         if path:
             self.load_layout(path)
 
     def _on_save_layout(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, "Guardar layout", filter="Layout (*.layout.json)")
+        path, _ = QFileDialog.getSaveFileName(self, "Guardar celda", filter="Celda (*.layout.json)")
         if path:
+            if not path.endswith(".json"):
+                path += ".layout.json"
             self.save_layout(path)

@@ -29,6 +29,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 MODELS_DIR = Path(__file__).resolve().parent / "models"
+# Modelos agregados por el usuario sin tocar el programa: un JSON con el mismo
+# formato que los de sim/models/ (y, opcional, su carpeta de mallas al lado).
+USER_MODELS_DIR = Path.home() / "BorunteDSL" / "modelos"
+
+
+def model_path(name: str) -> Path:
+    for directory in (USER_MODELS_DIR, MODELS_DIR):
+        path = directory / f"{name}.json"
+        if path.exists():
+            return path
+    raise FileNotFoundError(f"No hay un modelo {name!r} en {USER_MODELS_DIR} ni en {MODELS_DIR}")
 
 Matrix = list[list[float]]  # 4x4 homogénea
 Vec = tuple[float, float, float]
@@ -160,7 +171,7 @@ class RobotModel:
 
     @classmethod
     def load(cls, name: str) -> "RobotModel":
-        data = json.loads((MODELS_DIR / f"{name}.json").read_text(encoding="utf-8"))
+        data = json.loads(model_path(name).read_text(encoding="utf-8"))
         g = data["geometry_mm"]
         joints = tuple(
             Joint(j["min_deg"], j["max_deg"], j["max_speed_dps"], j.get("sign", 1))
@@ -171,7 +182,10 @@ class RobotModel:
 
     @staticmethod
     def available() -> list[str]:
-        return sorted(p.stem for p in MODELS_DIR.glob("*.json"))
+        names = {p.stem for p in MODELS_DIR.glob("*.json")}
+        if USER_MODELS_DIR.is_dir():
+            names |= {p.stem for p in USER_MODELS_DIR.glob("*.json")}
+        return sorted(names)
 
     # -- geometría en la posición cero ----------------------------------------------
 
@@ -275,12 +289,20 @@ class RobotModel:
                 return None
         return None
 
-    def _jacobian(self, q: list[float], rot_weight: float, h: float = 1e-4) -> list[list[float]]:
-        base = self.fk(q)
+    def _jacobian(self, q: list[float], rot_weight: float) -> list[list[float]]:
+        """Jacobiano exacto (por grado), en el mundo: cada eje gira alrededor de
+        su recta ya movida por los ejes anteriores. La columna i es
+        (ω_i × (p - c_i), ω_i), con ω_i el eje y c_i un punto de esa recta."""
+        frames = self.joint_frames(q)
+        flange = mat_mul(frames[-1], self._home_flange())
+        p = [flange[i][3] for i in range(3)]
         cols = []
-        for i in range(6):
-            dq = list(q)
-            dq[i] += h
-            e = pose_error(base, self.fk(dq))
-            cols.append([x / h for x in e[:3]] + [x * rot_weight / h for x in e[3:]])
+        for i, ((axis, point), joint) in enumerate(zip(self._screws(), self.joints)):
+            t = frames[i - 1] if i > 0 else identity()
+            w = [sum(t[r][k] * axis[k] for k in range(3)) * joint.sign for r in range(3)]
+            c = [sum(t[r][k] * point[k] for k in range(3)) + t[r][3] for r in range(3)]
+            d = [p[k] - c[k] for k in range(3)]
+            v = [w[1] * d[2] - w[2] * d[1], w[2] * d[0] - w[0] * d[2], w[0] * d[1] - w[1] * d[0]]
+            k = math.pi / 180  # columnas por grado, como q
+            cols.append([x * k for x in v] + [x * k * rot_weight for x in w])
         return [[cols[c][r] for c in range(6)] for r in range(6)]

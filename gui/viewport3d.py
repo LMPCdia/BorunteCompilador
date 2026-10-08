@@ -54,6 +54,7 @@ class Viewport3D:
         self._keep: list = []  # referencias Python a lo que Qt3D usa por debajo
         self._robot_links: list = []
         self._objects: list = []
+        self._path = None
 
         camera = self.window.camera()
         camera.lens().setPerspectiveProjection(40.0, 16 / 9, 10.0, 100000.0)
@@ -138,6 +139,48 @@ class Viewport3D:
         """`frames[i]` ubica el eslabón i+1 (la base no se mueve)."""
         for (_, transform), frame in zip(self._robot_links[1:], frames):
             transform.setMatrix(_qmatrix(frame))
+
+    # -- trayectoria de la punta ---------------------------------------------------------
+
+    def set_path(self, points: list[tuple[float, float, float]],
+                 colors: list[tuple[float, float, float]]) -> None:
+        """Línea por los puntos (sin iluminación: un color por vértice)."""
+        import struct
+
+        core, render, extras = self._core, self._render, self._extras
+        if self._path is not None:
+            self._path.setParent(None)
+            self._path = None
+        if len(points) < 2:
+            return
+        entity = core.QEntity(self.root)
+        geometry = core.QGeometry(entity)
+        data = bytearray()
+        for p, c in zip(points, colors):
+            data += struct.pack("<6f", *p, *c)
+        buffer = core.QBuffer(geometry)
+        buffer.setData(QByteArray(bytes(data)))
+        for name, offset in ((core.QAttribute.defaultPositionAttributeName(), 0),
+                             (core.QAttribute.defaultColorAttributeName(), 12)):
+            attr = core.QAttribute(geometry)
+            attr.setName(name)
+            attr.setVertexBaseType(core.QAttribute.VertexBaseType.Float)
+            attr.setVertexSize(3)
+            attr.setAttributeType(core.QAttribute.AttributeType.VertexAttribute)
+            attr.setBuffer(buffer)
+            attr.setByteStride(24)
+            attr.setByteOffset(offset)
+            attr.setCount(len(points))
+            geometry.addAttribute(attr)
+            self._keep.append(attr)
+        renderer = render.QGeometryRenderer()
+        renderer.setGeometry(geometry)
+        renderer.setPrimitiveType(render.QGeometryRenderer.PrimitiveType.LineStrip)
+        material = extras.QPerVertexColorMaterial()
+        entity.addComponent(renderer)
+        entity.addComponent(material)
+        self._keep += [geometry, buffer, renderer, material]
+        self._path = entity
 
     # -- objetos del layout ------------------------------------------------------------
 

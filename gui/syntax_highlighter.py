@@ -36,7 +36,7 @@ from PySide6.QtGui import (
 KEYWORDS = [
     "POINT", "VAR", "TIMER", "PROC", "ENDPROC",
     "IF", "THEN", "ELSE", "ENDIF",
-    "WAIT_IN", "WAIT", "UNTIL", "MOVE_DONE", "SET_OUT", "SPEED",
+    "WAIT_IN", "WAIT", "UNTIL", "MOVE_DONE", "SET_OUT", "SPEED", "TOOL", "COORD",
 ]
 MOVE_KINDS = ["MOVEJ", "MOVEL"]
 POINT_FUNCTIONS = ["WORLD", "JOINT", "OFFSET"]

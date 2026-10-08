@@ -25,6 +25,8 @@ statement: point_decl
          | set_out_stmt
          | if_stmt
          | call_stmt
+         | tool_stmt
+         | coord_stmt
 
 // --- Declaraciones -----------------------------------------------------
 
@@ -61,6 +63,11 @@ wait_time_stmt: "WAIT" number "s" NEWLINE
               | "WAIT" "UNTIL" "MOVE_DONE" NEWLINE
 
 set_out_stmt: "SET_OUT" "(" NAME "," STATE ")" NEWLINE
+
+// Herramienta y sistema de coordenadas de los movimientos que siguen (los
+// números son los del pad). Ver compiler/pad_codegen.py.
+tool_stmt: "TOOL" number NEWLINE
+coord_stmt: "COORD" number NEWLINE
 STATE.2: "ON" | "OFF"
 
 if_stmt: "IF" expr "THEN" NEWLINE then_block ("ELSE" NEWLINE else_block)? "ENDIF" NEWLINE

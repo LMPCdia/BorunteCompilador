@@ -114,6 +114,18 @@ class SetOutStmt:
 
 
 @dataclass
+class ToolStmt:
+    """`TOOL n`: herramienta del pad para los movimientos que siguen."""
+    number: int
+
+
+@dataclass
+class CoordStmt:
+    """`COORD n`: sistema de coordenadas del pad para los movimientos que siguen."""
+    number: int
+
+
+@dataclass
 class IfStmt:
     cond: Expr
     then_body: list["Stmt"]
@@ -142,6 +154,8 @@ Stmt = (
     | WaitInStmt
     | WaitTimeStmt
     | SetOutStmt
+    | ToolStmt
+    | CoordStmt
     | IfStmt
     | CallStmt
     | ProcDecl

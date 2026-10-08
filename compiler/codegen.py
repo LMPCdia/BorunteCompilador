@@ -47,6 +47,8 @@ from compiler.ast_nodes import (
     ProcDecl,
     SetOutStmt,
     TimerDecl,
+    ToolStmt,
+    CoordStmt,
     VarDecl,
     VarRef,
     WaitInStmt,
@@ -220,6 +222,8 @@ class _Emitter:
                 self.emit(Instruction(SET_VAR, a=idx, b=int(value)))
         elif isinstance(stmt, TimerDecl):
             pass  # v0.2: TIMER es metadata; se usa inline en WAIT <n>s
+        elif isinstance(stmt, (ToolStmt, CoordStmt)):
+            pass  # solo le importa al pad: la VM de referencia no tiene marcos
         elif isinstance(stmt, Assignment):
             self._emit_assignment(stmt)
         elif isinstance(stmt, MoveStmt):

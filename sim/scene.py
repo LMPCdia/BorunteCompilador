@@ -19,7 +19,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from sim.kinematics import MODELS_DIR, RobotModel
+from sim.kinematics import RobotModel, model_path
 from sim.meshes import Mesh, box, cylinder, load_mesh
 from sim.pad_sim import SimResult
 
@@ -34,11 +34,12 @@ def robot_link_meshes(model: RobotModel) -> list[Mesh]:
 
 
 def _mesh_files(model: RobotModel) -> list[Path] | None:
-    data = json.loads((MODELS_DIR / f"{model.name}.json").read_text(encoding="utf-8"))
+    path = model_path(model.name)
+    data = json.loads(path.read_text(encoding="utf-8"))
     names = data.get("meshes")
     if not names:
         return None
-    files = [MODELS_DIR / model.name / n for n in names]
+    files = [path.parent / model.name / n for n in names]
     return files if all(f.exists() for f in files) else None
 
 
@@ -79,12 +80,23 @@ class LayoutObject:
 
 @dataclass
 class Layout:
+    """La celda: modelo de robot, piezas importadas, y las herramientas y
+    sistemas de coordenadas del pad (número -> X, Y, Z, U, V, W)."""
+
     model: str = "BRTIRUS1820A"
     objects: list[LayoutObject] = field(default_factory=list)
+    tools: dict[int, list[float]] = field(default_factory=dict)
+    frames: dict[int, list[float]] = field(default_factory=dict)
 
     def save(self, path: str | Path) -> None:
         path = Path(path)
-        data = {"model": self.model, "objects": []}
+        data = {
+            "model": self.model,
+            # Claves como texto: JSON no tiene claves numéricas.
+            "tools": {str(k): list(v) for k, v in sorted(self.tools.items())},
+            "frames": {str(k): list(v) for k, v in sorted(self.frames.items())},
+            "objects": [],
+        }
         for obj in self.objects:
             item = asdict(obj)
             # Rutas relativas al layout, para poder mover la carpeta entera.
@@ -105,7 +117,12 @@ class Layout:
             if not Path(obj.path).is_absolute():
                 obj.path = str(path.parent / obj.path)
             objects.append(obj)
-        return cls(model=data.get("model", "BRTIRUS1820A"), objects=objects)
+        return cls(
+            model=data.get("model", "BRTIRUS1820A"),
+            objects=objects,
+            tools={int(k): [float(x) for x in v] for k, v in data.get("tools", {}).items()},
+            frames={int(k): [float(x) for x in v] for k, v in data.get("frames", {}).items()},
+        )
 
 
 # --- línea de tiempo -----------------------------------------------------------------

@@ -273,3 +273,40 @@ def test_listing_of_the_generated_backup_has_no_unknown_actions():
     assert "??" not in text
     assert "IF X012 OFF GOTO FinIf0" in text
     assert "CALL soldar()" in text
+
+
+# --- TOOL / COORD ------------------------------------------------------------------
+
+
+def test_tool_and_coord_change_the_following_moves():
+    src = HOME + PIEZA + "MOVEJ casa SPEED 10\nTOOL 2\nCOORD 1\nMOVEL pieza SPEED 10\n"
+    main = compile_to_pad(src).act.main
+    moves = [a for a in main if a["action"] in (4, 10)]
+    assert [m["toolCoord"] for m in moves] == [0, 131073]
+    assert {"action": 801, "insertedIndex": 4, "toolID": 2} in main
+
+
+def test_each_proc_starts_with_the_export_defaults():
+    src = PIEZA + "TOOL 2\nPROC p()\nMOVEL pieza SPEED 10\nENDPROC\np()\n"
+    backup = compile_to_pad(src, PadOptions(tool=1, coord=3))
+    [module] = backup.act.modules
+    [move] = [a for a in module.actions if a["action"] == 10]
+    assert move["toolCoord"] == (1 << 16) | 3
+
+
+def test_tool_inside_if_is_rejected():
+    with pytest.raises(CompileError, match="TOOL dentro de un IF"):
+        compile_to_pad("IF X010 == 1 THEN\nTOOL 2\nENDIF\n")
+
+
+@pytest.mark.parametrize("src", ["TOOL 2.5\n", "COORD 70000\n"])
+def test_tool_and_coord_must_be_whole_numbers(src):
+    with pytest.raises(CompileError, match="número entero"):
+        compile_to_pad(src)
+
+
+def test_tool_and_coord_are_ignored_by_the_reference_vm():
+    from compiler.codegen import compile_source
+
+    program = compile_source("TOOL 2\nCOORD 1\nSET_OUT(Y10, ON)\n")
+    assert [i.opcode for i in program.instructions] == ["SET_OUT", "END"]

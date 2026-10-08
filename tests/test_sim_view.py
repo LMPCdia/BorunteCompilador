@@ -172,15 +172,71 @@ def test_compile_error_is_reported_not_raised(app):
     assert any(s == "error" and "WAIT_IN" in m for s, m in reports)
 
 
-def test_inputs_box_drives_the_if(app):
+def test_input_checkboxes_appear_and_drive_the_if(app):
     from gui.sim_view import parse_inputs
 
     assert parse_inputs("X012=1, X013=0") == {2: True, 3: False}
     view = _view(app, "PROC p()\nWAIT 1s\nENDPROC\nIF X012 == 1 THEN\np()\nENDIF\n")
-    view.inputs_edit.setText("X012=1")
-    assert view.simulate().total_time_s == pytest.approx(1)
-    view.inputs_edit.setText("")
     assert view.simulate().total_time_s == 0
+    assert [b.text() for b in view._input_boxes.values()] == ["X012"]
+    view.set_input("X012", True)  # tildar re-simula solo
+    assert view.result.total_time_s == pytest.approx(1)
+
+
+def _backup_zip(tmp_path, source):
+    from compiler.pad_codegen import PadOptions, compile_to_pad
+
+    return compile_to_pad(source, PadOptions(program_name="Prueba")).write(tmp_path)
+
+
+def test_open_backup_simulates_it_instead_of_the_editor(app, tmp_path):
+    path = _backup_zip(tmp_path, f"MOVEJ {HOME} SPEED 50\nIF X030 == 1 THEN\nWAIT 2s\nENDIF\n")
+    reports = []
+    view = _view(app, "esto no compila", reports)
+    assert view.open_backup(path)
+    assert "Prueba" in view.source_label.text()
+    assert [b.text() for b in view._input_boxes.values()] == ["X030"]
+    assert view.simulate() is not None
+    view.set_input("X030", True)
+    assert view.result.segments[-1].kind == "WAIT"
+    view.use_editor()
+    assert view.simulate() is None  # vuelve al editor, que no compila
+
+
+def test_open_broken_backup_reports(app, tmp_path):
+    reports = []
+    bad = tmp_path / "HCBackupRobot_20260101000000.zip"
+    bad.write_bytes(b"no es un zip")
+    assert not _view(app, "", reports).open_backup(bad)
+    assert reports and reports[0][0] == "error"
+
+
+def test_tools_and_frames_tables_feed_the_simulation(app):
+    view = _view(app, f"MOVEJ {HOME} SPEED 50\nTOOL 2\nMOVEL WORLD(1556, 7, 900, 180, 0, 0) SPEED 20\n")
+    result = view.simulate()
+    assert "falta cargar herramienta 2" in result.issues[0].message
+    view.set_tool(2, [0, 0, 100, 0, 0, 0])
+    assert view.tools_table.values() == {2: [0, 0, 100, 0, 0, 0]}
+    result = view.simulate()
+    assert not any("falta cargar" in i.message for i in result.issues)
+    assert result.segments[-1].kind == "MOVEL"
+
+
+def test_cell_with_tools_frames_and_pieces_roundtrips(app, tmp_path):
+    piece = tmp_path / "mesa.stl"
+    write_stl(box((0, 0, 0), (100, 100, 100)), piece)
+    view = _view(app, "")
+    view.import_object(piece)
+    view.set_tool(2, [10, 0, 250, 0, 0, 0])
+    view.set_frame(1, [800, -300, 200, 0, 0, 30])
+    path = tmp_path / "celda.layout.json"
+    view.save_layout(path)
+
+    other = _view(app, "")
+    other.load_layout(path)
+    assert other.tools_table.values() == {2: [10, 0, 250, 0, 0, 0]}
+    assert other.frames_table.values() == {1: [800, -300, 200, 0, 0, 30]}
+    assert other.objects_table.rowCount() == 1
 
 
 def test_import_object_rests_on_the_floor_and_is_editable(app, tmp_path):

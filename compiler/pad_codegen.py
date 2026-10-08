@@ -18,6 +18,12 @@ Qué se traduce y a qué acción del pad:
 | `PROC` / llamada            | módulo + `20000`                     | Deducido  |
 | `IF Xnnn == 0 THEN`         | `10001` "si X ON saltar al fin"      | Deducido  |
 | `IF Xnnn == 1 THEN`         | `10001` con `pointStatus: 0` (OFF)   | Hipótesis |
+| `TOOL n` / `COORD n`        | `801` / `800` + `toolCoord` de cada movimiento | Deducido |
+
+`TOOL` y `COORD` valen para los movimientos que siguen, hasta el final del
+programa o del PROC donde están; cada PROC arranca con los valores de
+`PadOptions`. No se permiten dentro de un IF: el valor de los movimientos que
+siguen al IF dependería de si se entró o no, y eso se resuelve al compilar.
 
 Lo que NO se traduce (error de compilación, con el motivo):
 
@@ -52,6 +58,8 @@ from compiler.ast_nodes import (
     ProcDecl,
     SetOutStmt,
     TimerDecl,
+    ToolStmt,
+    CoordStmt,
     VarDecl,
     VarRef,
     WaitInStmt,
@@ -120,9 +128,12 @@ def _sorted(action: dict[str, Any]) -> Action:
 class _Builder:
     """Acciones de UN programa (el principal o un módulo), con sus etiquetas."""
 
-    def __init__(self) -> None:
+    def __init__(self, tool: int = 0, coord: int = 0) -> None:
         self.actions: list[Action] = []
         self._next_flag = 0
+        self.tool = tool
+        self.coord = coord
+        self.if_depth = 0
 
     def add(self, **fields: Any) -> Action:
         action = _sorted({**fields, "insertedIndex": len(self.actions)})
@@ -150,10 +161,6 @@ class _Compiler:
     modules: dict[str, int] = field(default_factory=dict)  # nombre -> id
     points: dict[str, _Point] = field(default_factory=dict)
     bodies: dict[str, list[Action]] = field(default_factory=dict)
-
-    @property
-    def tool_coord(self) -> int:
-        return (self.options.tool << 16) | self.options.coord
 
     # -- puntos ---------------------------------------------------------------
 
@@ -184,6 +191,19 @@ class _Compiler:
             self.points[stmt.name] = self.resolve_point(stmt.expr)
         elif isinstance(stmt, TimerDecl):
             pass  # igual que en el bytecode: es metadata
+        elif isinstance(stmt, (ToolStmt, CoordStmt)):
+            word = "TOOL" if isinstance(stmt, ToolStmt) else "COORD"
+            if out.if_depth:
+                raise CompileError(
+                    f"{word} dentro de un IF no se puede exportar: ponelo antes del IF "
+                    f"(o dentro de un PROC que llame el IF)."
+                )
+            if isinstance(stmt, ToolStmt):
+                out.tool = stmt.number
+                out.add(action=801, toolID=stmt.number)
+            else:
+                out.coord = stmt.number
+                out.add(action=800, coordID=stmt.number)
         elif isinstance(stmt, MoveStmt):
             self._emit_move(stmt, out)
         elif isinstance(stmt, SetOutStmt):
@@ -238,7 +258,8 @@ class _Compiler:
             action=4 if stmt.kind == "MOVEJ" else 10,
             bindIOInfo=0, ckStatus="63", customName=name, delay="0.000", distance="0.000",
             passTrans=0, points=[{"pointName": "", "pos": pos}], quotePoint=[0, 0, 0],
-            relativeType=0, smooth=0, speed=f"{stmt.speed:.1f}", toolCoord=self.tool_coord,
+            relativeType=0, smooth=0, speed=f"{stmt.speed:.1f}",
+            toolCoord=(out.tool << 16) | out.coord,
         )
 
     def _emit_if(self, stmt: IfStmt, out: _Builder) -> None:
@@ -266,7 +287,11 @@ class _Compiler:
         end = out.new_flag()
         out.add(action=10001, flag=end, inout=0, limit="0.000", point=point,
                 pointStatus=1 if skip_when_on else 0, type=0)
-        self.emit_block(stmt.then_body, out)
+        out.if_depth += 1
+        try:
+            self.emit_block(stmt.then_body, out)
+        finally:
+            out.if_depth -= 1
         out.place_label(end, f"FinIf{end}")
 
     def _emit_call(self, stmt: CallStmt, out: _Builder) -> None:
@@ -282,7 +307,7 @@ class _Compiler:
                 f"PROC {stmt.name}({', '.join(stmt.params)}): los módulos del pad no "
                 f"reciben parámetros"
             )
-        body = _Builder()
+        body = _Builder(self.options.tool, self.options.coord)
         self._emit_preamble(body)
         self.emit_block(stmt.body, body)
         body.add(action=20001)
@@ -323,7 +348,7 @@ def compile_to_pad(source: str, options: PadOptions | None = None) -> PadBackup:
 
     ast = build_ast(source)
     compiler = _Compiler(options, modules=_collect_modules(ast.statements))
-    main = _Builder()
+    main = _Builder(options.tool, options.coord)
     main.add(action=50000, comment="Generado por Borunte DSL")
     compiler._emit_preamble(main)
     compiler.emit_block(ast.statements, main)

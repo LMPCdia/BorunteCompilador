@@ -142,13 +142,61 @@ def test_unreachable_movel_is_an_error(model):
     assert result.issues[0].where == "MAIN[4]"
 
 
-def test_movel_with_tool_or_frame_is_skipped_with_a_warning(model):
-    from compiler.pad_codegen import PadOptions
-
-    src = f"MOVEL {_world_of(model, HOME)} SPEED 20\n"
-    result = simulate(compile_to_pad(src, PadOptions(tool=2)), model)
+def test_movel_with_unknown_tool_or_frame_is_skipped_with_one_warning(model):
+    src = f"TOOL 2\nCOORD 1\nMOVEL {_world_of(model, HOME)} SPEED 20\nMOVEL {_world_of(model, HOME)} SPEED 20\n"
+    result = simulate(compile_to_pad(src), model)
     assert result.ok
-    assert "herramienta/coordenadas" in result.issues[0].message
+    [issue] = result.issues
+    assert issue.message.startswith("2 MOVEL sin simular")
+    assert "herramienta 2" in issue.message and "coordenadas 1" in issue.message
+
+
+def test_movel_puts_the_tool_tip_on_the_point_measured_in_the_frame(model):
+    from sim.kinematics import mat_mul
+    from sim.pad_sim import PadSimulator, invert
+
+    tool = [0, 0, 250, 0, 0, 0]           # torcha de 250 mm en el eje de la brida
+    frame = [800, -300, 200, 0, 0, 30]    # mesa girada 30° y desplazada
+    sim = PadSimulator(model, tools={2: tool}, frames={1: frame})
+    # Punto en el sistema de la mesa, con la herramienta apuntando hacia abajo.
+    src = (f"MOVEJ JOINT({', '.join(map(str, HOME))}) SPEED 50\nTOOL 2\nCOORD 1\n"
+           "MOVEL WORLD(400, 300, 300, 180, 0, 0) SPEED 20\n")
+    result = sim.run(compile_to_pad(src))
+    assert result.ok, result.issues
+    q = result.segments[-1].samples[-1]
+    tip_in_world = mat_mul(model.fk(q), pose_matrix(*tool))
+    tip_in_frame = mat_mul(invert(pose_matrix(*frame)), tip_in_world)
+    err = pose_error(tip_in_frame, pose_matrix(400, 300, 300, 180, 0, 0))
+    assert max(map(abs, err[:3])) < 0.05 and max(map(abs, err[3:])) < 1e-3
+    assert sim.tcp(q, 2) == pytest.approx(tuple(tip_in_world[i][3] for i in range(3)))
+
+
+def test_unknown_actions_are_reported_once_per_code(model):
+    backup = compile_to_pad("WAIT 1s\n")
+    backup.act.main[1:1] = [{"action": 53000, "insertedIndex": 90},
+                            {"action": 53000, "insertedIndex": 91}]
+    [issue] = simulate(backup, model).issues
+    assert "53000" in issue.message and "2 vez" in issue.message
+
+
+def test_inputs_used_lists_the_inputs_the_program_reads():
+    from sim.pad_sim import inputs_used
+
+    src = "PROC p()\nIF X013 == 1 THEN\nWAIT 1s\nENDIF\nENDPROC\nIF X012 == 1 THEN\np()\nENDIF\n"
+    assert inputs_used(compile_to_pad(src)) == [2, 3]
+
+
+def test_user_models_directory(tmp_path, monkeypatch):
+    import json
+
+    import sim.kinematics as kin
+
+    data = json.loads((kin.MODELS_DIR / "BRTIRUS1820A.json").read_text(encoding="utf-8"))
+    data["name"] = "MiRobot"
+    (tmp_path / "MiRobot.json").write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr(kin, "USER_MODELS_DIR", tmp_path)
+    assert "MiRobot" in RobotModel.available()
+    assert RobotModel.load("MiRobot").a2 == 730
 
 
 def test_inputs_drive_the_if(model):
