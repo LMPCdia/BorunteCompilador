@@ -27,9 +27,15 @@ docs/SIMULATOR.md):
 - Perfil de velocidad: con `accel_s` = 0 cada movimiento va a velocidad
   constante de punta a punta (sin aceleraciones). Con `accel_s` > 0 cada
   movimiento arranca y termina quieto con un perfil trapezoidal: tarda
-  `accel_s` en llegar a la velocidad del tramo y otro tanto en frenar. El
-  tiempo real de aceleración del controlador NO se conoce (el respaldo solo
-  trae `speed` y `smooth`): es una hipótesis configurable. `smooth`
+  `accel_s` en llegar a la velocidad del tramo y otro tanto en frenar (el
+  respaldo solo trae `speed` y `smooth`: es una hipótesis configurable). Con
+  `accel_s` = None se usan las aceleraciones máximas de cada eje del modelo
+  (datasheet): el tramo tarda en acelerar lo que necesite el eje más
+  exigido. Sigue siendo un supuesto que el controlador acelere al máximo.
+- Velocidad lineal: si el modelo trae `max_linear_speed_mms`, un MOVEL no
+  lleva la punta más rápido que esa velocidad × SPEED % (hipótesis: que el %
+  del MOVEL sea sobre la velocidad lineal máxima). Sin el dato, solo limitan
+  los ejes. `smooth`
   (redondeo de esquinas, probablemente) no se simula: el robot real puede
   no detenerse entre movimientos.
 - Las entradas son fijas y el pad no tiene variables: volver a una etiqueta
@@ -149,9 +155,10 @@ class PadSimulator:
                  tools: dict[int, Pose6] | None = None,
                  frames: dict[int, Pose6] | None = None,
                  progress: Callable[[int], None] | None = None,
-                 accel_s: float = 0.0) -> None:
+                 accel_s: float | None = 0.0) -> None:
         self.model = model
-        self.accel_s = max(0.0, float(accel_s))
+        # None = las aceleraciones del modelo (si no tiene, sin perfil).
+        self.accel_s = None if accel_s is None else max(0.0, float(accel_s))
         self.inputs = inputs or {}
         # None = no se sabe dónde está el robot (hasta el primer MOVEJ).
         self.q: list[float] | None = list(start_deg) if start_deg else None
@@ -353,10 +360,10 @@ class PadSimulator:
                                           tool if tool in self.tools else 0, [0.0]))
             else:
                 samples = self._joint_path(self.q, target)
-                times = self._times(samples, speed)
+                times, ramp = self._times(samples, speed)
                 self._add_segment(Segment("MOVEJ", where, samples, times[-1], name,
                                           tool if tool in self.tools else 0, times,
-                                          accel_s=self.accel_s))
+                                          accel_s=ramp))
             self.q = list(target)
             self._last_known = list(target)
             return
@@ -381,9 +388,15 @@ class PadSimulator:
             return
         target_tcp = mat_mul(self.frames[coord], pose_matrix(*values))
         samples, failed = self._linear_path(target_tcp, self.tools[tool], where)
-        times = self._times(samples, speed)
+        tips = None
+        if self.model.max_linear_speed_mms:
+            tips = []
+            for q in samples:
+                m = mat_mul(self.model.fk(q), self.tools[tool])
+                tips.append((m[0][3], m[1][3], m[2][3]))
+        times, ramp = self._times(samples, speed, tips)
         self._add_segment(Segment("MOVEL", where, samples, times[-1], name, tool, times, failed,
-                                  accel_s=self.accel_s))
+                                  accel_s=ramp))
         if failed:
             r.skipped_moves += 1
             r.failed_moves += 1
@@ -486,12 +499,33 @@ class PadSimulator:
                         f"probable paso cerca de la singularidad de muñeca")
         return samples, False
 
-    def _times(self, samples: list[list[float]], speed: float) -> list[float]:
+    def _times(self, samples: list[list[float]], speed: float,
+               tips: list[tuple[float, float, float]] | None = None) -> tuple[list[float], float]:
+        """Tiempo de cada muestra y el tiempo de aceleración del tramo."""
         speeds = [j.max_speed_dps * speed for j in self.model.joints]
+        linear = (self.model.max_linear_speed_mms or 0.0) * speed
         times = [0.0]
-        for s0, s1 in zip(samples, samples[1:]):
-            times.append(times[-1] + max(abs(b - a) / v for a, b, v in zip(s0, s1, speeds)))
-        return trapezoid(times, self.accel_s)
+        for i, (s0, s1) in enumerate(zip(samples, samples[1:])):
+            dt = max(abs(b - a) / v for a, b, v in zip(s0, s1, speeds))
+            if tips is not None and linear > 0:
+                dt = max(dt, math.dist(tips[i], tips[i + 1]) / linear)
+            times.append(times[-1] + dt)
+        ramp = self._ramp(samples, times)
+        return trapezoid(times, ramp), ramp
+
+    def _ramp(self, samples: list[list[float]], times: list[float]) -> float:
+        """Tiempo de aceleración del tramo: el fijo, o con aceleraciones del
+        modelo, lo que tarda el eje más exigido en llegar a su velocidad."""
+        if self.accel_s is not None:
+            return self.accel_s
+        if not self.model.has_accelerations:
+            return 0.0
+        peak = [0.0] * 6
+        for (s0, s1), (t0, t1) in zip(zip(samples, samples[1:]), zip(times, times[1:])):
+            if t1 > t0:
+                for j in range(6):
+                    peak[j] = max(peak[j], abs(s1[j] - s0[j]) / (t1 - t0))
+        return max(v / joint.max_accel_dps2 for v, joint in zip(peak, self.model.joints))
 
 
 def trapezoid(times: list[float], accel_s: float) -> list[float]:
@@ -548,7 +582,7 @@ def untrapezoid(tau: float, total: float, accel_s: float) -> float:
 
 def simulate(backup: PadBackup, model: RobotModel, inputs: dict[int, bool] | None = None,
              start_deg: list[float] | None = None, tools: dict[int, Pose6] | None = None,
-             frames: dict[int, Pose6] | None = None, accel_s: float = 0.0) -> SimResult:
+             frames: dict[int, Pose6] | None = None, accel_s: float | None = 0.0) -> SimResult:
     return PadSimulator(model, inputs, start_deg, tools, frames, accel_s=accel_s).run(backup)
 
 

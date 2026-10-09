@@ -9,8 +9,9 @@ from sim import library
 from sim.meshes import box, write_stl
 
 
-def entry(entry_id: str, name: str, folder: bool) -> str:
+def entry(entry_id: str, name: str, folder: bool, sheet: bool = False) -> str:
     href = (f"https://drive.google.com/drive/folders/{entry_id}" if folder
+            else f"https://docs.google.com/spreadsheets/d/{entry_id}/edit?usp=drive_web" if sheet
             else f"https://drive.google.com/file/d/{entry_id}/view?usp=drive_web")
     return (f'<div class="flip-entry" id="entry-{entry_id}" tabindex="0" role="link">'
             f'<div class="flip-entry-info"><a href="{href}" target="_blank"><div '
@@ -50,14 +51,23 @@ class FakeDrive:
                                  entry("F_DOC", "LEEME - cómo cargar modelos", False),
                                  entry("F_PDF", "plano mesa.pdf", False)),
             "D_1510A00000": page(entry("F_ROBOT", "BRTIRUS1510A modelo.STEP", False),
+                                 entry("S_PARAMS", "Parámetros BRTIRUS1510A", False, sheet=True),
                                  entry("ROOT00000000", "vuelta a la raíz", True)),
         }
+        from tests.test_robot_params import SHEET
+
+        self.sheets = {"S_PARAMS": SHEET}
         self.downloads = []
         self.online = True
 
     def __call__(self, url: str, method: str):
         if not self.online:
             raise library.LibraryError("sin red")
+        if "/spreadsheets/d/" in url:
+            sid = url.split("/spreadsheets/d/")[1].split("/")[0]
+            if sid not in self.sheets:
+                return b"<html>login</html>", {"content-type": "text/html"}
+            return self.sheets[sid].encode("utf-8"), {"content-type": "text/csv; charset=utf-8"}
         if "embeddedfolderview" in url:
             fid = url.split("id=")[1]
             if fid not in self.folders:
@@ -195,19 +205,43 @@ def test_a_cell_from_another_pc_downloads_its_library_pieces(view, drive, tmp_pa
     assert view.layout_data.objects[0].drive_id == "F_MESA"
 
 
-def test_robot_already_installed_is_just_selected(view):
+def test_robot_from_the_app_gets_the_sheet_without_reimporting(view, tmp_path, monkeypatch):
+    import sim.kinematics as kinematics
+
+    models = tmp_path / "modelos"
+    monkeypatch.setattr(kinematics, "USER_MODELS_DIR", models)
+    view.library.models_dir = models
     view.library.refresh()
+    robot = next(i for i in view.library.catalog.items if i.name.startswith("BRTIRUS1510A"))
+    assert (robot.params_kind, robot.params_name) == ("sheet", "Parámetros BRTIRUS1510A")
     _select(view, "BRTIRUS1510A modelo.STEP")
     assert view.library.robot_btn.isEnabled()
     view.model_combo.setCurrentText("BRTIRUS1820A")
     view.library.use_selected()
     assert view.model.name == "BRTIRUS1510A"
-    assert "ya está instalado" in view.library.status.text()
+    assert view.model.has_accelerations and view.model.max_linear_speed_mms == 1800
+    assert "F_ROBOT" not in view.library.fetch.downloads          # no bajó el STEP
+    text = view.library.status.text()
+    assert "ejes de «Parámetros BRTIRUS1510A»" in text and "60/60 poses" in text
+    assert (models / "BRTIRUS1510A.json").exists()                 # override del usuario
+    assert view.accel_auto.isEnabled()                             # aceleraciones del datasheet
 
 
-def test_a_new_robot_is_imported_and_selected(view, tmp_path, monkeypatch):
+def test_a_broken_sheet_is_explained(view):
+    reports = []
+    view.library._report = lambda s, m: reports.append((s, m))
+    view.library.fetch.sheets["S_PARAMS"] = "Eje,Mínimo,Máximo,Velocidad\nJ1,1,0,10\n"
+    view.library.refresh()
+    _select(view, "BRTIRUS1510A modelo.STEP")
+    view.library.use_selected()
+    assert reports[-1][0] == "error"
+    assert "el mínimo (1) no es menor que el máximo (0)" in reports[-1][1]
+    assert "faltan los ejes J2" in reports[-1][1]
+
+
+def test_a_new_robot_is_imported_once_and_again_only_if_the_step_changes(view, tmp_path,
+                                                                         monkeypatch):
     import json
-    import shutil
 
     import sim.kinematics as kinematics
     import sim.robot_import as robot_import
@@ -216,9 +250,11 @@ def test_a_new_robot_is_imported_and_selected(view, tmp_path, monkeypatch):
     models.mkdir()
     monkeypatch.setattr(kinematics, "USER_MODELS_DIR", models)
     view.library.models_dir = models
+    imports = []
 
     def fake_import(step, name, out_dir, joints_from, progress=None):
         # Lo que dejaría la importación real (que tarda minutos): un modelo más.
+        imports.append(name)
         data = json.loads((kinematics.MODELS_DIR / "BRTIRUS1820A.json").read_text(encoding="utf-8"))
         data["name"] = name
         (out_dir / f"{name}.json").write_text(json.dumps(data), encoding="utf-8")
@@ -229,14 +265,51 @@ def test_a_new_robot_is_imported_and_selected(view, tmp_path, monkeypatch):
 
     monkeypatch.setattr(robot_import, "import_robot_step", fake_import)
     view.library.refresh()
-    item = _select(view, "otro.step")
-    del item
+    _select(view, "otro.step")
+    new = library.Item("F_ROBOT", "BRTIRUS2010A.step", "Robots", "Robots", "robot",
+                       params_id="S_PARAMS", params_kind="sheet", params_name="Parámetros")
+    view.library.catalog.items[[i.name for i in view.library.catalog.items].index("otro.step")] = new
+
+    view.library.use_selected()
+    assert imports == ["BRTIRUS2010A"]
+    assert view.model.name == "BRTIRUS2010A" and view.model.has_accelerations
+    assert "CAD importado" in view.library.status.text()
+    saved = json.loads((models / "BRTIRUS2010A.json").read_text(encoding="utf-8"))
+    assert saved["cad"]["drive_id"] == "F_ROBOT" and saved["joints"][0]["max_accel_dps2"] == 450
+
+    view.library.use_selected()                       # otra vez: solo relee la planilla
+    assert imports == ["BRTIRUS2010A"]
+    view.library.fetch.files["F_ROBOT"] += b" "        # subieron otro STEP
+    view.library.use_selected()
+    assert imports == ["BRTIRUS2010A", "BRTIRUS2010A"]
+
+
+def test_robot_without_sheet_warns(view, tmp_path, monkeypatch):
+    import json
+
+    import sim.kinematics as kinematics
+    import sim.robot_import as robot_import
+
+    models = tmp_path / "modelos"
+    models.mkdir()
+    monkeypatch.setattr(kinematics, "USER_MODELS_DIR", models)
+    view.library.models_dir = models
+    reports = []
+    view.library._report = lambda s, m: reports.append((s, m))
+
+    def fake_import(step, name, out_dir, joints_from, progress=None):
+        data = json.loads((kinematics.MODELS_DIR / "BRTIRUS1820A.json").read_text(encoding="utf-8"))
+        (out_dir / f"{name}.json").write_text(json.dumps(data), encoding="utf-8")
+        return out_dir / f"{name}.json", None
+
+    monkeypatch.setattr(robot_import, "import_robot_step", fake_import)
+    view.library.refresh()
+    _select(view, "otro.step")
     view.library.catalog.items[[i.name for i in view.library.catalog.items].index("otro.step")] = \
         library.Item("F_ROBOT", "BRTIRUS2010A.step", "Robots", "Robots", "robot")
     view.library.use_selected()
     assert view.model.name == "BRTIRUS2010A"
-    assert "importado" in view.library.status.text()
-    shutil.rmtree(models)
+    assert any("sin planilla de parámetros" in m for _s, m in reports)
 
 
 def test_errors_reach_the_user(view):

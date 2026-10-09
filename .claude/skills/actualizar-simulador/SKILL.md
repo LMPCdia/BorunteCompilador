@@ -50,6 +50,17 @@ palabra a `TOOL_WORDS` (y un test).
 
 ## 2. Robot nuevo
 
+Un robot es su carpeta `Robots/<MODELO>/` con el STEP y la **planilla de
+parámetros** (copiar la Google Sheet *Parámetros BRTIRUS1510A* y completarla
+con el datasheet; formato en `sim/robot_params.py`). En la app, *Usar este
+robot* lee la planilla, importa el STEP si hace falta, compara cotas y
+alcance con el CAD y verifica la cinemática inversa
+(`prepare_from_library`). Si el usuario pasa el datasheet en PDF o imagen,
+**no completes la planilla adivinando**: transcribí solo lo que se lee con
+certeza, marcá "Confirmado: no" en lo dudoso y mostrále al usuario los
+valores para que los confirme. Las celdas se escriben con el conector de
+Google Sheets (`update_values`), sin tocar el formato de la planilla.
+
 Un robot que el usuario va a usar seguido conviene **traerlo a la app**
 (`sim/models/`), como el BRTIRUS1510A: así funciona sin red y queda probado.
 Desde la pestaña Biblioteca también se importa solo, pero a la PC de cada uno

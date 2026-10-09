@@ -21,7 +21,7 @@ import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from sim.kinematics import RobotModel, model_path
+from sim.kinematics import MODELS_DIR, RobotModel, model_path
 from sim.meshes import Mesh, box, cylinder, load_mesh
 from sim.pad_sim import Segment, SimResult, untrapezoid
 
@@ -50,8 +50,14 @@ def _mesh_files(model: RobotModel) -> list[Path] | None:
     names = data.get("meshes")
     if not names:
         return None
-    files = [path.parent / model.name / n for n in names]
-    return files if all(f.exists() for f in files) else None
+    # Las mallas van al lado del JSON. Un modelo del usuario que solo cambia
+    # los ejes de un robot que viene con la app (planilla de parámetros) usa
+    # las mallas de la app.
+    for folder in (path.parent / model.name, MODELS_DIR / model.name):
+        files = [folder / n for n in names]
+        if all(f.exists() for f in files):
+            return files
+    return None
 
 
 def _simple_links(m: RobotModel, tool_axis: bool = True) -> list[Mesh]:

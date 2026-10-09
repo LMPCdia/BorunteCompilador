@@ -94,6 +94,41 @@ Clasificación **por carpeta** (no por nombre de archivo):
   fuera de `Robots/`, CAD nativo sin un STEP al lado). Las reglas para quien
   sube archivos están en el doc *LEEME - cómo cargar modelos* de la carpeta.
 
+## Robot = CAD + planilla de parámetros (`sim/robot_params.py`)
+
+Cada robot de la biblioteca es una carpeta `Robots/<MODELO>/` con:
+
+- el **STEP del ensamble** del fabricante → geometría (cotas) y mallas;
+- la **planilla de parámetros** (Google Sheet o CSV; la del 1510A es
+  *Parámetros BRTIRUS1510A*, copiarla para otro robot) → por eje: rango,
+  velocidad máxima, aceleración máxima, sentido de giro, si está confirmado;
+  y datos generales: alcance, carga, velocidad lineal máxima, cotas del plano;
+- opcional, el PDF del datasheet (la app no lo lee: es para quien completa la
+  planilla). Un PDF no se interpreta solo a propósito: un número mal leído de
+  un datasheet en chino terminaría moviendo el robot real.
+
+**Usar este robot** (pestaña Biblioteca) hace todo solo:
+
+1. lee la planilla (siempre, de la web: si alguien la corrigió, se usa lo nuevo);
+2. baja e importa el STEP **solo si el robot no está o si el STEP cambió**
+   en Drive (se compara tamaño y fecha; un robot que viene con la app no se
+   reimporta);
+3. arma el modelo: la geometría del CAD manda; las cotas y el alcance de la
+   planilla se comparan con el CAD y se avisa si difieren (más de 2 mm o 2 %);
+4. **verifica la cinemática inversa**: 60 poses al azar dentro de los rangos,
+   directa → inversa → directa, tienen que cerrar a menos de 0.1 mm;
+5. lo guarda en `~/BorunteDSL/modelos/<MODELO>.json` y lo elige. Lo que la
+   planilla marca sin confirmar queda como hipótesis en las notas del modelo.
+
+Con aceleraciones en la planilla, la casilla **del datasheet** (al lado de
+*Aceleración*) usa la aceleración máxima de cada eje: cada movimiento tarda
+en acelerar lo que necesite el eje más exigido. Con velocidad lineal máxima,
+los MOVEL no llevan la punta más rápido que esa velocidad × SPEED %
+(hipótesis: que el % del MOVEL sea sobre la velocidad lineal).
+
+Desde la consola: `python -m sim.robot_params planilla.csv --model BRTIRUS1510A
+[--write]` (y `-` en vez del CSV imprime la plantilla).
+
 ## Gráficas de movimiento (`sim/motion.py`, `gui/motion_charts.py`)
 
 Botón **Gráficas…** (o *Simulación → Gráficas de movimiento*, Ctrl+G):

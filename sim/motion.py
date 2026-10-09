@@ -54,11 +54,13 @@ class MotionCurves:
 
 
 def analyze(timeline: Timeline, model: RobotModel, tools: dict[int, Matrix] | None = None,
-            accel_s: float = 0.0) -> MotionCurves:
+            accel_s: float | None = 0.0) -> MotionCurves:
     """`tools`: matrices de las herramientas (número -> brida->punta)."""
     tools = tools or {}
     duration = timeline.duration
-    curves = MotionCurves(accelerations_valid=accel_s > 0)
+    # None = aceleraciones del modelo (datasheet).
+    curves = MotionCurves(accelerations_valid=(accel_s is None and model.has_accelerations)
+                          or (accel_s is not None and accel_s > 0))
     if duration <= 0:
         return curves
     dt = max(MIN_DT, duration / MAX_POINTS)

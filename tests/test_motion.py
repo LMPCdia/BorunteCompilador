@@ -177,3 +177,71 @@ def test_changing_the_acceleration_marks_the_result_stale(app):
     assert not view.stale
     view.accel_spin.setValue(view.accel_spin.value() + 0.1)
     assert view.stale
+
+
+# --- aceleraciones y velocidad lineal del datasheet ----------------------------------------
+
+
+@pytest.fixture
+def datasheet_model(tmp_path, monkeypatch):
+    """El 1510A con aceleraciones por eje y velocidad lineal máxima."""
+    import json
+
+    import sim.kinematics as kinematics
+
+    data = json.loads((kinematics.MODELS_DIR / "BRTIRUS1510A.json").read_text(encoding="utf-8"))
+    for joint, accel in zip(data["joints"], (400, 500, 600, 800, 900, 1200)):
+        joint["max_accel_dps2"] = accel
+    data["max_linear_speed_mms"] = 1000
+    data.pop("meshes")
+    monkeypatch.setattr(kinematics, "USER_MODELS_DIR", tmp_path)
+    (tmp_path / "CON_DATASHEET.json").write_text(json.dumps(data), encoding="utf-8")
+    return RobotModel.load("CON_DATASHEET")
+
+
+def test_the_slowest_joint_to_accelerate_sets_the_ramp(datasheet_model):
+    m = datasheet_model
+    assert m.has_accelerations and m.max_linear_speed_mms == 1000
+    # Solo J1, 60° al 50 %: llega a 95 °/s con 400 °/s² -> tarda 0.2375 s.
+    src = ("MOVEJ JOINT(0, 30, -20, 0, -60, 0) SPEED 50\n"
+           "MOVEJ JOINT(60, 30, -20, 0, -60, 0) SPEED 50\n")
+    result = simulate(compile_to_pad(src, PadOptions(allow_unverified=True)), m, accel_s=None)
+    seg = result.segments[-1]
+    cruise = m.joints[0].max_speed_dps * 0.5
+    assert seg.accel_s == pytest.approx(cruise / 400)
+    assert seg.duration_s == pytest.approx(60 / cruise + cruise / 400)
+    curves = analyze(Timeline(result), m, accel_s=None)
+    assert curves.accelerations_valid
+    assert max(curves.accel[0]) == pytest.approx(400, rel=0.15)
+
+
+def test_movel_does_not_go_faster_than_the_linear_speed(datasheet_model):
+    from sim.kinematics import matrix_to_pose
+
+    m = datasheet_model
+    start = [0.0, 30.0, -20.0, 0.0, -60.0, 0.0]
+    x, y, z, u, v, w = matrix_to_pose(m.fk(start))
+    src = (f"MOVEJ JOINT({', '.join(map(str, start))}) SPEED 50\n"
+           f"MOVEL WORLD({x:.3f}, {y + 400:.3f}, {z:.3f}, {u:.3f}, {v:.3f}, {w:.3f}) SPEED 50\n")
+    result = simulate(compile_to_pad(src, PadOptions(allow_unverified=True)), m, accel_s=0.0)
+    # 400 mm a 1000 mm/s × 50 % = 0.8 s como mínimo (los ejes solos tardaban menos).
+    assert result.segments[-1].duration_s >= 0.8 - 1e-6
+    curves = analyze(Timeline(result), m)
+    assert max(curves.tcp_speed) == pytest.approx(500, rel=0.05)
+
+
+def test_gui_offers_datasheet_accelerations_only_when_the_model_has_them(app, datasheet_model):
+    from gui.sim_view import SimView
+
+    view = SimView(lambda: f"MOVEJ {HOME} SPEED 50\nMOVEJ JOINT(30, 30, -20, 0, -60, 0) SPEED 50\n",
+                   enable_3d=False)
+    view.model_combo.setCurrentText("BRTIRUS1510A")
+    assert not view.accel_auto.isEnabled()
+    assert view.accel_setting() == view.accel_spin.value()
+    view.use_robot("CON_DATASHEET")
+    assert view.accel_auto.isEnabled() and view.accel_auto.isChecked()
+    assert view.accel_setting() is None and not view.accel_spin.isEnabled()
+    view.simulate()
+    assert "con las aceleraciones del datasheet" in view.summary.text()
+    view.accel_auto.setChecked(False)
+    assert view.accel_setting() == view.accel_spin.value()

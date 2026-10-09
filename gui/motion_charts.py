@@ -98,7 +98,7 @@ class MotionCharts(QWidget):
 
     # -- datos -----------------------------------------------------------------------
 
-    def set_data(self, curves: MotionCurves, model: RobotModel, accel_s: float,
+    def set_data(self, curves: MotionCurves, model: RobotModel, accel_s: float | None,
                  collisions=None) -> None:
         self.curves = curves
         dark = self.palette().window().color().lightness() < 128
@@ -115,7 +115,10 @@ class MotionCharts(QWidget):
             self._fill(key, unit, curves.t, series, bands, dark)
         self._fill_table(curves, model)
         parts = [f"<b>{model.name}</b> · {curves.t[-1]:.1f} s" if curves.t else model.name]
-        if curves.accelerations_valid:
+        if curves.accelerations_valid and accel_s is None:
+            parts.append("aceleraciones con las máximas de cada eje del <b>datasheet</b> "
+                         "(supuesto: el controlador acelera al máximo)")
+        elif curves.accelerations_valid:
             parts.append(f"aceleraciones con un arranque y frenado <b>supuesto</b> de "
                          f"{accel_s:g} s por movimiento (el pad no informa el real)")
         else:
@@ -124,8 +127,12 @@ class MotionCharts(QWidget):
         if collisions is not None and collisions.contacts:
             parts.append("<span style='color:#d04040'>franjas rojas: choques</span>, "
                          "<span style='color:#d08000'>naranjas: más cerca que el margen</span>")
-        parts.append("velocidad de la punta en MOVEL según los ejes (falta la velocidad lineal "
-                     "máxima del robot). Clic en una gráfica: la animación va a ese instante")
+        if model.max_linear_speed_mms:
+            parts.append(f"MOVEL limitado a {model.max_linear_speed_mms:g} mm/s × SPEED %")
+        else:
+            parts.append("velocidad de la punta en MOVEL según los ejes (falta la velocidad "
+                         "lineal máxima en el datasheet)")
+        parts.append("clic en una gráfica: la animación va a ese instante")
         self.note.setText(" · ".join(parts) + ".")
 
     def _fill(self, key: str, unit: str, ts, series, bands, dark: bool) -> None:

@@ -18,6 +18,11 @@ Clasificación: por la CARPETA, no por el nombre del archivo.
 Solo se listan formatos que el simulador lee (STEP, STL, OBJ); los de
 SolidWorks/Inventor se cuentan aparte para avisar.
 
+Robots: en la carpeta del robot, además del STEP, va la **planilla de
+parámetros** (Google Sheet o CSV, ver `sim/robot_params.py`): rangos,
+velocidades, aceleraciones. Se empareja sola con el STEP de su carpeta y se
+lee de nuevo cada vez que se elige el robot.
+
 Límite conocido: la vista web de Drive muestra hasta unos cientos de
 archivos por carpeta. Si una carpeta crece más, conviene dividirla.
 """
@@ -36,6 +41,7 @@ DEFAULT_FOLDER = "1BnYko-GDci726XcNMSW4Adn8om8zg6oO"   # RobotsBoruntesSimulador
 CACHE_DIR = Path.home() / "BorunteDSL" / "biblioteca"
 FOLDER_URL = "https://drive.google.com/embeddedfolderview?id={id}"
 DOWNLOAD_URL = "https://drive.usercontent.google.com/download?id={id}&export=download&confirm=t"
+SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/{id}/export?format=csv"
 USABLE = (".step", ".stp", ".stl", ".obj")
 # CAD que el simulador no lee: se cuentan para avisar que hay que exportarlos.
 # Lo demás (un LEEME, fotos, planos en PDF) se ignora sin decir nada.
@@ -63,6 +69,7 @@ class Entry:
     id: str
     name: str
     is_folder: bool
+    is_sheet: bool = False   # Google Sheet (se baja como CSV)
 
 
 @dataclass(frozen=True)
@@ -72,6 +79,9 @@ class Item:
     category: str           # carpeta de primer nivel ("" = en la raíz)
     folder: str             # ruta de carpetas dentro de la biblioteca
     kind: str               # "robot" | "herramienta" | "pieza"
+    params_id: str = ""     # planilla de parámetros de la carpeta (solo robots)
+    params_kind: str = ""   # "sheet" | "csv"
+    params_name: str = ""
 
     @property
     def robot_name(self) -> str | None:
@@ -121,7 +131,7 @@ def parse_folder(page: str) -> list[Entry]:
     out = []
     for m in _ENTRY.finditer(page):
         entry_id, href, name = m.group(1), m.group(2), html.unescape(m.group(3)).strip()
-        out.append(Entry(entry_id, name, "/folders/" in href))
+        out.append(Entry(entry_id, name, "/folders/" in href, "/spreadsheets/d/" in href))
     return out
 
 
@@ -155,7 +165,9 @@ def scan(root: str, fetch: Fetch = _http) -> Catalog:
         if fid in seen:
             continue
         seen.add(fid)
-        for entry in list_folder(fid, fetch):
+        entries = list_folder(fid, fetch)
+        params = _params_entry(entries)
+        for entry in entries:
             if entry.is_folder:
                 if depth < MAX_DEPTH:
                     pending.append((entry.id, path + [entry.name], depth + 1))
@@ -166,9 +178,45 @@ def scan(root: str, fetch: Fetch = _http) -> Catalog:
                 continue
             category = path[0] if path else ""
             folder = "/".join(path)
-            items.append(Item(entry.id, entry.name, category, folder,
-                              classify(category, folder, entry.name)))
+            kind = classify(category, folder, entry.name)
+            extra = {}
+            if kind == "robot" and params is not None:
+                extra = {"params_id": params.id, "params_name": params.name,
+                         "params_kind": "sheet" if params.is_sheet else "csv"}
+            items.append(Item(entry.id, entry.name, category, folder, kind, **extra))
     return Catalog(items, unusable)
+
+
+def _params_entry(entries: list[Entry]) -> Entry | None:
+    """La planilla de parámetros de una carpeta: una Google Sheet o un CSV
+    (si hay varias, la que diga "parámetros"/"datasheet" en el nombre)."""
+    candidates = [e for e in entries if not e.is_folder
+                  and (e.is_sheet or e.name.lower().endswith(".csv"))]
+    for word in ("param", "datasheet", "planilla", "ficha"):
+        for e in candidates:
+            if word in e.name.lower():
+                return e
+    return candidates[0] if candidates else None
+
+
+def fetch_params(item: Item, fetch: Fetch = _http) -> str:
+    """Texto CSV de la planilla del robot (siempre de la web: es chica y
+    puede haber cambiado)."""
+    if not item.params_id:
+        raise LibraryError(f"«{item.name}» no tiene planilla de parámetros en su carpeta")
+    url = (SHEET_CSV_URL if item.params_kind == "sheet" else DOWNLOAD_URL).format(id=item.params_id)
+    body, headers = fetch(url, "GET")
+    if "text/html" in headers.get("content-type", ""):
+        raise LibraryError(f"Drive no dejó leer la planilla «{item.params_name}»: ¿está "
+                           f"compartida como «Cualquier persona con el enlace»?")
+    return body.decode("utf-8-sig", "replace")
+
+
+def remote_meta(item: Item, fetch: Fetch = _http) -> dict[str, str]:
+    """Tamaño y fecha del archivo en Drive (sin bajarlo)."""
+    _b, headers = fetch(DOWNLOAD_URL.format(id=item.file_id), "HEAD")
+    return {"drive_id": item.file_id, "content-length": headers.get("content-length", ""),
+            "last-modified": headers.get("last-modified", "")}
 
 
 # --- descarga con caché --------------------------------------------------------------------
@@ -225,6 +273,9 @@ def problems(catalog: Catalog) -> list[str]:
             out.append(f"«{where}» es un robot: va en Robots/{item.robot_name or '<MODELO>'}/")
         if item.kind == "robot" and not item.robot_name:
             out.append(f"«{where}» está en Robots pero el nombre no dice el modelo (BRTIRUSxxxxA)")
+        if item.kind == "robot" and not item.params_id:
+            out.append(f"«{where}»: falta la planilla de parámetros en su carpeta (copiar "
+                       f"«Parámetros BRTIRUS1510A» y completarla con el datasheet)")
     # CAD nativo al lado de un STEP es una copia de referencia (como las piezas
     # de SolidWorks junto al ensamble del robot): solo molesta si en esa
     # carpeta no hay nada que el simulador pueda usar.

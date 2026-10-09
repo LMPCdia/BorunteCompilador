@@ -30,7 +30,6 @@ from sim import library
 from sim.kinematics import USER_MODELS_DIR, RobotModel
 
 KIND_LABEL = {"robot": "Robot", "herramienta": "Herramienta", "pieza": "Pieza"}
-JOINTS_FROM = "BRTIRUS1510A"   # rangos y velocidades para un robot nuevo (HIPÓTESIS)
 
 
 class _Task(QThread):
@@ -236,34 +235,27 @@ class LibraryPanel(QWidget):
                   f"Bajando «{item.name}»…")
 
     def _use_robot(self, item: library.Item) -> None:
-        name = item.robot_name or Path(item.name).stem.split()[0]
-        if name in RobotModel.available():
-            mine = Path(self.models_dir) / f"{name}.json"
-            again = (f" Para volver a importarlo, borrá {mine}." if mine.exists()
-                     else " (Viene con la app.)")
-            self.status.setText(f"{name} ya está instalado: se usa ese.{again}")
-            self._on_robot(name)
-            return
+        """Robot = STEP (geometría y mallas) + planilla de parámetros (ejes):
+        se bajan los dos, se arma el modelo y se verifica la cinemática."""
         fetch, cache, out = self.fetch, self.cache_dir, self.models_dir
 
         def work(progress):
-            from sim.robot_import import import_robot_step
+            from sim.robot_params import prepare_from_library
 
-            progress(f"Bajando «{item.name}»…")
-            path = library.download(item, cache, fetch)
-            progress(f"Importando {name} (unos minutos)…")
-            model_file, robot = import_robot_step(
-                path, name, out, JOINTS_FROM,
-                progress=lambda i, n, part: progress(f"Importando {name}: parte {i + 1} de {n} "
-                                                     f"({part})"))
-            return name, robot.reach_mm
+            return prepare_from_library(item, fetch, cache, out, progress)
 
         def done(result):
-            robot_name, reach = result
-            self.status.setText(f"{robot_name} importado: alcance medido {reach:.0f} mm. Rangos y "
-                                f"velocidades copiados del {JOINTS_FROM} (confirmar).")
-            self._report("warning", f"{robot_name}: rangos y velocidades copiados del "
-                                    f"{JOINTS_FROM} hasta tener su tabla (hipótesis).")
-            self._on_robot(robot_name)
+            ok, n, worst = result.ik
+            parts = [f"{result.name} listo"]
+            if result.imported:
+                parts.append(f"CAD importado (alcance medido {result.reach_mm:.0f} mm)")
+            if result.params_source:
+                parts.append(f"ejes de «{result.params_source}»")
+            parts.append(f"cinemática inversa verificada en {ok}/{n} poses")
+            self.status.setText(". ".join(parts) + "." +
+                                ("" if not result.warnings else " Ver avisos en Mensajes."))
+            for warning in result.warnings:
+                self._report("warning", f"{result.name}: {warning}")
+            self._on_robot(result.name)
 
-        self._run(work, done, f"Preparando {name}…")
+        self._run(work, done, f"Preparando {item.robot_name or item.name}…")

@@ -365,6 +365,11 @@ class SimView(QWidget):
             accel = DEFAULT_ACCEL_S
         self.accel_spin.setValue(accel)
         self.accel_spin.valueChanged.connect(self._on_accel_changed)
+        self.accel_auto = QCheckBox("del datasheet")
+        self.accel_auto.setToolTip("Usar las aceleraciones máximas de cada eje cargadas en el "
+                                   "modelo (planilla de parámetros del robot)")
+        self.accel_auto.setChecked(True)
+        self.accel_auto.toggled.connect(self._on_accel_auto)
         self.charts_btn = QPushButton("Gráficas…")
         self.charts_btn.setToolTip("Posición, velocidad y aceleración de cada eje y de la punta")
         self.charts_btn.clicked.connect(self.show_charts)
@@ -375,6 +380,7 @@ class SimView(QWidget):
         bottom.addWidget(self.time_label)
         bottom.addWidget(QLabel("Aceleración:"))
         bottom.addWidget(self.accel_spin)
+        bottom.addWidget(self.accel_auto)
         bottom.addWidget(self.charts_btn)
 
         center = QWidget()
@@ -682,6 +688,8 @@ class SimView(QWidget):
         self._settings.setValue("sim/model", name)
         if meshes is not None:
             self.viewport.set_robot(meshes)
+        if hasattr(self, "accel_auto"):
+            self._update_accel_controls()
         self.show_pose(self.current_q)
         if previous is not None and previous.name != name:
             self._mark_stale(f"se cambió el robot a {name}")
@@ -878,7 +886,7 @@ class SimView(QWidget):
         try:
             simulator = PadSimulator(self.model, self.inputs(), tools=self.layout_data.tools,
                                      frames=self.layout_data.frames, progress=self._progress,
-                                     accel_s=self.accel_spin.value())
+                                     accel_s=self.accel_setting())
             result = simulator.run(backup)
             report = self._check_collisions(result)
         except Cancelled:
@@ -903,7 +911,7 @@ class SimView(QWidget):
         self._paint_collisions(None)
         self.stale = False
         self.timeline = Timeline(result)
-        self._accel_used = self.accel_spin.value()
+        self._accel_used = self.accel_setting()
         self.curves = analyze(self.timeline, self.model, simulator.tools, self._accel_used)
         self._refresh_charts()
         self._draw_path(simulator)
@@ -1006,8 +1014,12 @@ class SimView(QWidget):
         time_note = " (parcial)" if result.skipped_moves or not result.complete else ""
         cycle = " (un ciclo: el programa se repite)" if result.cyclic else ""
         accel = self._accel_used
-        accel_note = (f"con arranque/frenado supuesto de {accel:g} s" if accel > 0
-                      else "sin aceleraciones")
+        if accel is None:
+            accel_note = "con las aceleraciones del datasheet"
+        elif accel > 0:
+            accel_note = f"con arranque/frenado supuesto de {accel:g} s"
+        else:
+            accel_note = "sin aceleraciones"
         parts.append(f"tiempo de ciclo estimado {result.total_time_s:.1f} s{time_note}{cycle}, "
                      f"{accel_note}")
         parts.append(f"{errors} error(es), {warnings} aviso(s)")
@@ -1146,6 +1158,23 @@ class SimView(QWidget):
     def _chart_clicked(self, t: float) -> None:
         self.play_btn.setChecked(False)
         self.set_time(t)
+
+    def accel_setting(self) -> float | None:
+        """None = las aceleraciones del modelo; si no, el tiempo del campo."""
+        usable = self.model is not None and self.model.has_accelerations
+        if usable and self.accel_auto.isChecked():
+            return None
+        return self.accel_spin.value()
+
+    def _update_accel_controls(self) -> None:
+        usable = self.model is not None and self.model.has_accelerations
+        self.accel_auto.setEnabled(usable)
+        self.accel_auto.setVisible(usable)
+        self.accel_spin.setEnabled(not (usable and self.accel_auto.isChecked()))
+
+    def _on_accel_auto(self, _checked: bool) -> None:
+        self._update_accel_controls()
+        self._mark_stale("cambió de dónde salen las aceleraciones")
 
     def _on_accel_changed(self, value: float) -> None:
         self._settings.setValue("sim/accel_s", float(value))

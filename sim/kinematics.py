@@ -177,6 +177,7 @@ class Joint:
     max_deg: float
     max_speed_dps: float
     sign: int = 1  # sentido de giro respecto del modelo (hipótesis)
+    max_accel_dps2: float | None = None  # del datasheet; sin dato, el simulador supone un perfil
 
 
 @dataclass(frozen=True)
@@ -191,6 +192,11 @@ class RobotModel:
     joints: tuple[Joint, ...]
     reach_mm: float | None = None
     notes: str = ""
+    max_linear_speed_mms: float | None = None  # velocidad máxima de la punta (datasheet)
+
+    @property
+    def has_accelerations(self) -> bool:
+        return all(j.max_accel_dps2 for j in self.joints)
 
     @classmethod
     def load(cls, name: str) -> "RobotModel":
@@ -203,7 +209,8 @@ class RobotModel:
             g = data["geometry_mm"]
             joints = tuple(
                 Joint(float(j["min_deg"]), float(j["max_deg"]), float(j["max_speed_dps"]),
-                      int(j.get("sign", 1)))
+                      int(j.get("sign", 1)),
+                      float(j["max_accel_dps2"]) if j.get("max_accel_dps2") else None)
                 for j in data["joints"]
             )
             if len(joints) != 6:
@@ -211,11 +218,17 @@ class RobotModel:
             if any(j.sign not in (1, -1) or j.min_deg >= j.max_deg or j.max_speed_dps <= 0
                    for j in joints):
                 raise ValueError("algún eje tiene sign distinto de ±1, rango vacío o velocidad ≤ 0")
+            if any(j.max_accel_dps2 is not None and j.max_accel_dps2 <= 0 for j in joints):
+                raise ValueError("algún eje tiene aceleración ≤ 0")
+            linear = data.get("max_linear_speed_mms")
+            linear = float(linear) if linear else None
+            if linear is not None and linear <= 0:
+                raise ValueError("max_linear_speed_mms tiene que ser > 0")
             dims = {k: float(g[k]) for k in ("d1", "a1", "a2", "a3", "d4", "d6")}
         except (OSError, ValueError, KeyError, TypeError) as e:
             raise ValueError(f"Modelo de robot {path.name} inválido: {e}") from None
         return cls(name=path.stem, joints=joints, reach_mm=data.get("reach_mm"),
-                   notes=data.get("notes", ""), **dims)
+                   notes=data.get("notes", ""), max_linear_speed_mms=linear, **dims)
 
     @staticmethod
     def _candidates() -> list[str]:

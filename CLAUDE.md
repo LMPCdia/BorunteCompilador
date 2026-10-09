@@ -69,7 +69,9 @@ respaldo real; la lógica se prueba contra `comms/robot_simulator.py`.
   piezas como sólidos, piso, el propio brazo, herramienta montada en la
   brida), gráficas de movimiento (perfil de aceleración supuesto), navegación
   tipo Inventor, ubicación de piezas por distancias y biblioteca en línea de
-  Google Drive (`sim/library.py`). Ver `docs/SIMULATOR.md`.
+  Google Drive (`sim/library.py`): cada robot = STEP + planilla de parámetros
+  (`sim/robot_params.py`), que se baja, se compara con el CAD y se verifica
+  con la cinemática inversa. Ver `docs/SIMULATOR.md`.
 - **GUI** (`gui/`): "Exportar para el pad" (Ctrl+E) + pestaña "Pad" con el
   listado; compilar/ejecutar en la VM; digitalizar puntos.
 - **`packaging/`** + `.github/workflows/build-exe.yml`: `.exe` de un solo
