@@ -372,3 +372,38 @@ def test_datasheet_pdf_is_found_and_reported(drive, view, capsys, monkeypatch):
     assert view.library.datasheet_btn.isEnabled()
     assert view.library.open_datasheet()
     assert opened == ["https://drive.google.com/file/d/F_PDF1510/view"]
+
+
+def test_pdf_without_sheet_is_pending_even_without_step(drive, capsys):
+    import json as _json
+
+    drive.folders["D_ROBOTS0000"] = page(entry("D_2010000000", "BRTIRUS2010A", True))
+    drive.folders["D_2010000000"] = page(entry("F_PDF2010", "Datasheet 2010.pdf", False))
+    catalog = library.scan("ROOT00000000", drive)
+    [pending] = catalog.pending
+    assert (pending.model, pending.folder, pending.folder_id) == (
+        "BRTIRUS2010A", "Robots/BRTIRUS2010A", "D_2010000000")
+    assert pending.pdf_id == "F_PDF2010" and not pending.has_step
+    assert library.main(["ROOT00000000", "--pendientes"], fetch=drive) == 0
+    listed = _json.loads(capsys.readouterr().out)
+    assert listed[0]["pdf_name"] == "Datasheet 2010.pdf"
+    # Con la planilla ya hecha, deja de estar pendiente.
+    drive.folders["D_2010000000"] = page(entry("F_PDF2010", "Datasheet 2010.pdf", False),
+                                         entry("S_P2010", "Parámetros BRTIRUS2010A", False, sheet=True))
+    assert library.scan("ROOT00000000", drive).pending == []
+
+
+def test_sheet_not_yet_reviewed_against_its_pdf_is_pending(drive, capsys):
+    import json as _json
+
+    assert library.main(["ROOT00000000", "--pendientes"], fetch=drive) == 0
+    [review] = _json.loads(capsys.readouterr().out)
+    assert review["action"] == "revisar" and review["model"] == "BRTIRUS1510A"
+    assert review["params_id"] == "S_PARAMS" and review["pdf_id"] == "F_PDF1510"
+    assert review["folder_id"] == "D_1510A00000"
+    # Una vez revisada (la fila guarda el ID del PDF), no vuelve a salir.
+    drive.sheets["S_PARAMS"] += "Datasheet revisado,F_PDF1510,,,\n"
+    assert library.main(["ROOT00000000", "--pendientes"], fetch=drive) == 0
+    assert _json.loads(capsys.readouterr().out) == []
+    from sim.robot_params import parse_params
+    parse_params(drive.sheets["S_PARAMS"])        # la fila nueva no rompe la planilla

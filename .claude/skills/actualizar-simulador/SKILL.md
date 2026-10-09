@@ -63,27 +63,46 @@ En la app, *Usar este robot* lee la planilla, importa el STEP si hace falta,
 compara cotas y alcance con el CAD y verifica la cinemática inversa
 (`prepare_from_library`).
 
-### Armar la planilla desde el PDF
+### Armar la planilla desde el PDF (la rutina lo hace sola)
 
-Cuando `python -m sim.library` dice "está el datasheet … pero falta la
-planilla", o el usuario lo pide:
+`python -m sim.library --pendientes` lista en JSON qué hacer:
 
-1. Bajar el PDF (ID de `Item.datasheet_id`) con
-   `curl -L -o ds.pdf "https://drive.usercontent.google.com/download?id=<ID>&export=download&confirm=t"`
-   al scratchpad y leerlo con la herramienta Read (páginas de a 20). Si es
-   escaneado o en chino, leer las imágenes con cuidado.
-2. Copiar la planilla del 1510A a la carpeta del robot: `copy_file` de
-   `10p1u009Q3EEa8RKT2w4vAlHO6KkgjUvT9q4enW9e-ss` con `parentId` = carpeta del
-   robot y título `Parámetros <MODELO>`, y cambiar B1 por el modelo.
-3. Llenar con `update_values` (Google Sheets) solo las celdas de datos (B4:G9
-   ejes, B12:B21 generales), sin tocar el formato. **No adivines**: lo que no
-   se lee con certeza queda vacío o con "Confirmado: no" y una nota que diga
-   de qué página salió o por qué hay duda. Rango "±165°" se escribe tal cual.
-   Las aceleraciones casi nunca están en el datasheet: dejarlas vacías.
-4. Mostrarle al usuario la tabla transcripta con la página de cada dato y
-   pedirle que confirme; recién ahí poner "sí" en Confirmado.
-5. Verificar con `python -m sim.library` (ya no debe pedir la planilla) y, si
-   el robot está en la app, `prepare_from_library` (cinemática 60/60).
+- `"action": "crear"`: carpeta de robot con PDF y sin planilla;
+- `"action": "revisar"`: hay planilla y PDF, pero la planilla no se revisó
+  contra ESE PDF (la fila «Datasheet revisado» no tiene el `pdf_id`).
+
+Por cada uno:
+
+1. Bajar el PDF al scratchpad:
+   `curl -L -o ds.pdf "https://drive.usercontent.google.com/download?id=<pdf_id>&export=download&confirm=t"`
+   y leerlo con la herramienta Read (de a 20 páginas). Buscar la tabla de
+   parámetros ("Basic Parameters", "Specifications", 基本参数, 动作范围,
+   最大速度): rango y velocidad máxima por eje, alcance, carga,
+   repetibilidad, y si aparecen, aceleraciones y velocidad lineal máxima.
+2. **crear**: copiar la plantilla formateada con `copy_file`
+   (`fileId` `10p1u009Q3EEa8RKT2w4vAlHO6KkgjUvT9q4enW9e-ss`, `parentId` =
+   `folder_id`, `title` = `Parámetros <model>`) y escribir el modelo en B1.
+   **revisar**: trabajar sobre `params_id`.
+3. Escribir con `update_values` (Google Sheets, pestaña `Parámetros`) solo
+   las celdas de datos, sin tocar el formato:
+   - ejes en B4:H9 (Mínimo, Máximo, Velocidad, Aceleración, Sentido,
+     Confirmado, Notas); generales en B12:E21; `Datasheet revisado` en B22
+     con el `pdf_id`.
+   - **No adivines.** Cada valor que escribas tiene que leerse en el PDF;
+     en Notas va "pág. N" de donde salió. Lo que no está o no se lee con
+     certeza queda vacío. Un rango simétrico se escribe "±165".
+   - **Confirmado = "no"** en todo lo que escribas (lo confirma el usuario).
+     En "revisar", no pises un valor ya confirmado ("sí"): si el PDF dice
+     otra cosa, dejalo y anotá la diferencia en Notas.
+   - **Sentido**: el datasheet casi nunca lo dice; no lo cambies.
+   - Las aceleraciones casi nunca están: vacías salvo que el PDF las dé.
+4. Verificar: bajar la planilla como CSV
+   (`https://docs.google.com/spreadsheets/d/<id>/export?format=csv`) y
+   pasarla por `sim.robot_params.parse_params`; tiene que leerse sin errores.
+   `python -m sim.library --pendientes` ya no tiene que listarla.
+5. Avisar al usuario: qué planilla, la tabla transcripta con la página de
+   cada dato, qué quedó vacío y por qué, y que revise y ponga "sí" en
+   Confirmado.
 
 Un robot que el usuario va a usar seguido conviene **traerlo a la app**
 (`sim/models/`), como el BRTIRUS1510A: así funciona sin red y queda probado.

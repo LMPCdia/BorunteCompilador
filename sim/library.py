@@ -33,7 +33,7 @@ import html
 import json
 import re
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -84,6 +84,7 @@ class Item:
     params_name: str = ""
     datasheet_id: str = ""  # PDF del fabricante en la carpeta (solo para verlo)
     datasheet_name: str = ""
+    folder_id: str = ""     # carpeta de Drive donde está
 
     @property
     def datasheet_url(self) -> str:
@@ -97,9 +98,25 @@ class Item:
 
 
 @dataclass
+class PendingSheet:
+    """Carpeta de robot con el datasheet en PDF y sin planilla de parámetros:
+    hay que armarla leyendo el PDF (lo hace la rutina de Claude, ver
+    .claude/skills/actualizar-simulador)."""
+    model: str
+    folder: str             # ruta dentro de la biblioteca
+    folder_id: str          # carpeta de Drive donde va la planilla
+    pdf_id: str
+    pdf_name: str
+    has_step: bool
+    action: str = "crear"   # "crear" la planilla | "revisar" la que hay contra un PDF nuevo
+    params_id: str = ""     # la planilla a revisar
+
+
+@dataclass
 class Catalog:
     items: list[Item]
     unusable: list[str]     # archivos que el simulador no lee (SLDPRT, IPT…)
+    pending: list[PendingSheet] = field(default_factory=list)
 
     def categories(self) -> list[str]:
         return sorted({i.category for i in self.items}, key=lambda c: (c == "", c.lower()))
@@ -163,7 +180,7 @@ def classify(category: str, folder: str, name: str) -> str:
 
 def scan(root: str, fetch: Fetch = _http) -> Catalog:
     """Recorre la carpeta y sus subcarpetas (hasta MAX_DEPTH niveles)."""
-    items, unusable = [], []
+    items, unusable, sheets = [], [], []
     pending = [(folder_id(root), [], 0)]
     seen = set()
     while pending:
@@ -195,8 +212,15 @@ def scan(root: str, fetch: Fetch = _http) -> Catalog:
                          "params_kind": "sheet" if params.is_sheet else "csv"}
             if kind == "robot" and pdf is not None:
                 extra.update(datasheet_id=pdf.id, datasheet_name=pdf.name)
-            items.append(Item(entry.id, entry.name, category, folder, kind, **extra))
-    return Catalog(items, unusable)
+            items.append(Item(entry.id, entry.name, category, folder, kind, folder_id=fid, **extra))
+        in_robots = len(path) >= 2 and path[0].lower() == "robots"
+        if in_robots and pdf is not None and params is None:
+            names = " ".join([path[-1], pdf.name] + [e.name for e in entries])
+            m = re.search(r"BRTIRUS\d+[A-Z]?", names.upper())
+            has_step = any(e.name.lower().endswith((".step", ".stp")) for e in entries)
+            sheets.append(PendingSheet(m.group(0) if m else path[-1], "/".join(path), fid,
+                                       pdf.id, pdf.name, has_step))
+    return Catalog(items, unusable, sheets)
 
 
 def _params_entry(entries: list[Entry]) -> Entry | None:
@@ -209,6 +233,25 @@ def _params_entry(entries: list[Entry]) -> Entry | None:
             if word in e.name.lower():
                 return e
     return candidates[0] if candidates else None
+
+
+REVIEWED_KEY = "Datasheet revisado"   # fila de la planilla: ID del PDF ya transcripto
+
+
+def pending_reviews(catalog: Catalog, fetch: Fetch = _http) -> list[PendingSheet]:
+    """Robots con planilla Y datasheet, cuya planilla todavía no se revisó
+    contra ESE PDF (la fila «Datasheet revisado» no tiene su ID)."""
+    out = []
+    for item in catalog.items:
+        if item.kind != "robot" or not item.params_id or not item.datasheet_id:
+            continue
+        if item.datasheet_id in fetch_params(item, fetch):
+            continue
+        folder_id_ = item.folder_id
+        out.append(PendingSheet(item.robot_name or item.folder.split("/")[-1], item.folder,
+                                folder_id_, item.datasheet_id, item.datasheet_name, True,
+                                "revisar", item.params_id))
+    return out
 
 
 def fetch_params(item: Item, fetch: Fetch = _http) -> str:
@@ -308,12 +351,25 @@ def main(argv: list[str] | None = None, fetch: Fetch = _http) -> int:
     """python -m sim.library [CARPETA]: qué hay en la biblioteca y qué está mal ubicado."""
     import sys
 
-    args = sys.argv[1:] if argv is None else argv
+    args = list(sys.argv[1:] if argv is None else argv)
+    as_json = "--pendientes" in args
+    args = [a for a in args if a != "--pendientes"]
     try:
         catalog = scan(args[0] if args else DEFAULT_FOLDER, fetch)
     except LibraryError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 2
+    if as_json:
+        # Para la rutina que arma las planillas: qué PDFs esperan su planilla.
+        from dataclasses import asdict
+
+        try:
+            todo = catalog.pending + pending_reviews(catalog, fetch)
+        except LibraryError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 2
+        print(json.dumps([asdict(p) for p in todo], ensure_ascii=False, indent=2))
+        return 0
     for category in catalog.categories():
         print(f"{category or '(raíz)'}/")
         for item in catalog.items:

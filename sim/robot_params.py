@@ -328,6 +328,7 @@ def template_csv(data: dict) -> str:
     w.writerow(["Repetibilidad", "", "mm", "", ""])
     w.writerow(["Velocidad lineal máx", _g(data.get("max_linear_speed_mms")), "mm/s", "",
                 "limita los MOVEL"])
+    w.writerow(["Datasheet revisado", "", "", "", "ID del PDF ya transcripto (lo llena la rutina)"])
     for key in DIM_KEYS:
         w.writerow([key, "", "mm", "", "cota del plano (opcional: se compara con el CAD)"])
     return out.getvalue()
