@@ -40,6 +40,24 @@ piso (z = 0) y se ubica con la tabla: X, Y, Z respecto de la base del robot y
 giro alrededor del eje vertical. **Guardar layout…** escribe un
 `.layout.json` con rutas relativas, así la carpeta se puede mover entera.
 
+### Ubicar piezas por distancias (`sim/placement.py`)
+
+Pestaña **Piezas**: elegí la pieza en la tabla (una recién importada ya queda
+elegida) y en **Ubicar**:
+
+| Modo | Qué se indica |
+|---|---|
+| A una distancia del robot | distancia al eje de J1 (hasta la cara más cercana o hasta el centro) y ángulo (0° = adelante, +X; 90° = a la izquierda, +Y) |
+| Corrida respecto de… | ΔX, ΔY, ΔZ desde la base del robot o desde otra pieza |
+| Al lado de… | lado (+X, -X, +Y, -Y) y separación entre caras, centrada y en el mismo piso |
+| Encima de… | apoyada arriba de otra pieza, con corrimiento ΔX, ΔY |
+
+Todo se mide sobre la caja de la pieza ya girada; el punto de apoyo es el
+centro de su base. Abajo se ve al instante el tamaño, la distancia al eje del
+robot y la separación por eje con cada pieza; **Medir distancias** calcula la
+distancia mínima real entre superficies (python-fcl) al robot en la pose que
+se ve y a cada pieza.
+
 Los STEP se convierten a triángulos con **gmsh** (dependencia nueva, trae
 OpenCascade; suma ~60 MB al `.exe`). La malla es gruesa a propósito: alcanza
 para ver la celda, no para medir.

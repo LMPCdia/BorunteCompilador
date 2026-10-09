@@ -363,6 +363,20 @@ class CollisionChecker:
             out.append((part.name, other.name, max(0.0, float(d))))
         return out
 
+    def robot_distance(self, q: list[float], obstacle: Obstacle) -> tuple[str, float]:
+        """(parte más cercana, distancia mínima) del robot en la pose `q` a
+        una pieza cualquiera (para medir al ubicar piezas)."""
+        solid = _Solid(-1, obstacle)
+        placed = self._pose(q)
+        done: set = set()
+        best = ("", math.inf)
+        for part in self.parts:
+            self._set(part, placed, done)
+            d = fcl.distance(part.object, solid.object, fcl.DistanceRequest(), fcl.DistanceResult())
+            if d < best[1]:
+                best = (part.name, max(0.0, float(d)))
+        return best
+
     # -- recorrer la simulación -----------------------------------------------------------------
 
     def check(self, result: SimResult,

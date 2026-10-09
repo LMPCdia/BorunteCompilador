@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
+    QGridLayout,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
@@ -41,6 +42,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSlider,
     QSplitter,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -55,6 +57,7 @@ from pad.listing import io_name
 from sim import collision
 from sim.kinematics import RobotModel, identity, pose_matrix, rot_axis
 from sim.meshes import Mesh, MeshError, load_mesh
+from sim import placement
 from sim.motion import MotionCurves, analyze
 from sim.pad_sim import Cancelled, PadSimulator, SimResult, inputs_used
 from sim.scene import Layout, LayoutObject, Timeline, has_real_meshes, robot_link_meshes
@@ -114,6 +117,17 @@ def _number(text: str) -> float:
 
 def _fmt(value: float) -> str:
     return f"{(value or 0.0):g}"  # sin "-0"
+
+
+def _vscroll(widget: QWidget) -> QScrollArea:
+    """Panel con scroll vertical: si no entra en alto, no agranda la ventana
+    ni empuja a los demás."""
+    area = QScrollArea()
+    area.setWidget(widget)
+    area.setWidgetResizable(True)
+    area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    area.setFrameShape(QScrollArea.Shape.NoFrame)
+    return area
 
 
 class PoseTable(QWidget):
@@ -238,6 +252,8 @@ class SimView(QWidget):
         self.curves: MotionCurves | None = None
         self.charts = None  # ventana de gráficas (se crea al abrirla)
         self._accel_used = 0.0
+        self._measure_key = None            # robot armado para medir distancias
+        self._measure_checker_obj = None
         self._painted: dict[int, str] = {}  # pieza -> color que se le puso por choque
         self.timeline: Timeline | None = None
         self.stale = False
@@ -370,14 +386,21 @@ class SimView(QWidget):
                      "(o derecho) = desplazar; Shift + medio (o izquierdo) = orbitar; doble clic "
                      "con el medio o F6 = encuadrar; flechas = desplazar.")
             self.viewport.on_fit = lambda: self.set_camera("fit")
-            for label, view in (("Encuadrar", "fit"), ("Iso", "iso"), ("Arriba", "arriba"),
+            fit_btn = QPushButton("Encuadrar")
+            fit_btn.setToolTip(mouse)
+            fit_btn.clicked.connect(lambda: self.set_camera("fit"))
+            self.view_combo = QComboBox()
+            self.view_combo.setToolTip("Vistas estándar, encuadradas (como el ViewCube)")
+            for label, view in (("Vista…", None), ("Iso", "iso"), ("Arriba", "arriba"),
                                 ("Frente", "frente"), ("Lado", "lado"), ("Atrás", "atras"),
                                 ("Izquierda", "izquierda")):
-                btn = QPushButton(label)
-                btn.setToolTip(mouse)
-                btn.clicked.connect(lambda _=False, v=view: self.set_camera(v))
-                cams.addWidget(btn)
-            cams.addStretch(1)
+                self.view_combo.addItem(label, view)
+            self.view_combo.activated.connect(self._on_view_chosen)
+            hint = QLabel("Rueda: zoom · Medio: desplazar · Shift+medio: orbitar")
+            hint.setToolTip(mouse)
+            cams.addWidget(fit_btn)
+            cams.addWidget(self.view_combo)
+            cams.addWidget(hint, 1)
             center_layout.addLayout(cams)
             self.viewport.widget.setToolTip(mouse)
             center_layout.addWidget(self.viewport.widget, 1)
@@ -445,6 +468,8 @@ class SimView(QWidget):
         row.addWidget(import_btn)
         row.addWidget(remove_btn)
         objects_layout.addLayout(row)
+        objects_layout.addWidget(self._build_placement())
+        self.objects_table.itemSelectionChanged.connect(self._on_piece_selected)
 
         # -- herramientas y coordenadas --
         self.tools_table = PoseTable(
@@ -460,8 +485,8 @@ class SimView(QWidget):
 
         tabs = QTabWidget()
         tabs.addTab(issues, "Problemas")
-        tabs.addTab(objects, "Piezas")
-        tabs.addTab(self._build_collisions(), "Choques")
+        tabs.addTab(_vscroll(objects), "Piezas")
+        tabs.addTab(_vscroll(self._build_collisions()), "Choques")
         tabs.addTab(self.tools_table, "Herramientas")
         tabs.addTab(self.frames_table, "Coordenadas")
         self.side_tabs = tabs
@@ -479,6 +504,83 @@ class SimView(QWidget):
         row2.addWidget(save_btn)
         side_layout.addLayout(row2)
         return side
+
+    def _build_placement(self) -> QWidget:
+        """Ubicar la pieza elegida por distancias (sim/placement.py) y medir."""
+        def spin(lo: float, hi: float, value: float = 0.0, suffix: str = " mm") -> QDoubleSpinBox:
+            box = QDoubleSpinBox()
+            box.setRange(lo, hi)
+            box.setDecimals(1)
+            box.setSuffix(suffix)
+            box.setValue(value)
+            return box
+
+        self.place_title = QLabel("<b>Ubicar</b>: elegí una pieza en la tabla.")
+        self.place_mode = QComboBox()
+        self.place_mode.addItems(["A una distancia del robot", "Corrida respecto de…",
+                                  "Al lado de…", "Encima de…"])
+        self.place_ref = QComboBox()
+        self.place_stack = QStackedWidget()
+
+        def grid(rows) -> QWidget:
+            w = QWidget()
+            g = QGridLayout(w)
+            g.setContentsMargins(0, 0, 0, 0)
+            for r, (label, widget) in enumerate(rows):
+                g.addWidget(QLabel(label), r, 0)
+                g.addWidget(widget, r, 1)
+            g.setColumnStretch(1, 1)
+            return w
+
+        self.place_distance = spin(0, 20000, 800)
+        self.place_angle = spin(-180, 180, 0, "°")
+        self.place_angle.setToolTip("0° = adelante del robot (+X), 90° = a su izquierda (+Y)")
+        self.place_to = QComboBox()
+        self.place_to.addItems(["hasta la cara", "hasta el centro"])
+        robot = grid([("Distancia", self.place_distance), ("Medida", self.place_to),
+                      ("Ángulo", self.place_angle)])
+        self.place_dx, self.place_dy, self.place_dz = (spin(-20000, 20000) for _ in range(3))
+        offset = grid([("ΔX", self.place_dx), ("ΔY", self.place_dy), ("ΔZ", self.place_dz)])
+        self.place_side = QComboBox()
+        self.place_side.addItems(list(placement.SIDES))
+        self.place_gap = spin(-5000, 20000, 200)
+        side = grid([("Lado", self.place_side), ("Separación entre caras", self.place_gap)])
+        self.place_top_dx, self.place_top_dy = spin(-20000, 20000), spin(-20000, 20000)
+        top = grid([("Corrida ΔX", self.place_top_dx), ("Corrida ΔY", self.place_top_dy)])
+
+        for w in (robot, offset, side, top):
+            self.place_stack.addWidget(w)
+        self.place_mode.currentIndexChanged.connect(self._on_place_mode)
+        apply_btn = QPushButton("Ubicar")
+        apply_btn.clicked.connect(self.apply_placement)
+        measure_btn = QPushButton("Medir distancias")
+        measure_btn.setToolTip("Distancia mínima real (entre superficies) al robot, en la pose "
+                               "que se ve, y a cada pieza")
+        measure_btn.clicked.connect(self.measure_selected)
+        self.place_info = QLabel()
+        self.place_info.setWordWrap(True)
+        self.place_info.setTextFormat(Qt.TextFormat.RichText)
+        self.place_info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 6, 0, 0)
+        lay.addWidget(self.place_title)
+        lay.addWidget(self.place_mode)
+        lay.addWidget(self.place_ref)
+        lay.addWidget(self.place_stack)
+        row = QHBoxLayout()
+        row.addWidget(apply_btn)
+        row.addWidget(measure_btn)
+        row.addStretch(1)
+        lay.addLayout(row)
+        lay.addWidget(self.place_info)
+        note = QLabel("Las distancias se miden a la caja de cada pieza (con su giro), y el apoyo "
+                      "es el centro de su base. El robot está en el origen; 0° es adelante.")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        self._on_place_mode(0)
+        return box
 
     def _build_collisions(self) -> QWidget:
         self.collisions_check = QCheckBox("Buscar choques al simular")
@@ -1011,6 +1113,12 @@ class SimView(QWidget):
         if self.viewport is not None and self.model is not None:
             self.viewport.set_joint_frames(self.model.joint_frames(q))
 
+    def _on_view_chosen(self, index: int) -> None:
+        view = self.view_combo.itemData(index)
+        self.view_combo.setCurrentIndex(0)
+        if view:
+            self.set_camera(view)
+
     def set_camera(self, view: str) -> None:
         if self.viewport is None:
             return
@@ -1116,6 +1224,7 @@ class SimView(QWidget):
         self._refresh_objects(rebuild=True)
         self._mark_collisions_stale("se agregó una pieza")
         self._report("info", f"Importado {Path(path).name} ({len(mesh)} triángulos).")
+        self.objects_table.selectRow(len(self.layout_data.objects) - 1)  # lista para ubicar
         return obj
 
     def load_layout(self, path: str | Path) -> bool:
@@ -1180,6 +1289,8 @@ class SimView(QWidget):
                              "cuenta tocarla, no acercarse")
             self.objects_table.setItem(row, WORKPIECE_COLUMN, check)
         self._updating_table = False
+        if hasattr(self, "place_ref"):
+            self._fill_refs()
         if self.viewport is None:
             return
         if rebuild or self.viewport.object_count() != len(self.layout_data.objects):
@@ -1214,6 +1325,150 @@ class SimView(QWidget):
             self._report("warning", f"«{item.text()}» no es un número")
         self._refresh_objects(rebuild=False)
         self._mark_collisions_stale("se movió una pieza")
+
+    # -- ubicar piezas -------------------------------------------------------------------------
+
+    def selected_piece(self) -> int | None:
+        rows = {i.row() for i in self.objects_table.selectedIndexes()}
+        row = min(rows) if rows else self.objects_table.currentRow()
+        return row if 0 <= row < len(self.layout_data.objects) else None
+
+    def _on_place_mode(self, mode: int) -> None:
+        self.place_stack.setCurrentIndex(mode)
+        self.place_ref.setVisible(mode != 0)
+        self._fill_refs()
+
+    def _fill_refs(self) -> None:
+        current = self.place_ref.currentData()
+        sel = self.selected_piece()
+        self.place_ref.blockSignals(True)
+        self.place_ref.clear()
+        if self.place_mode.currentIndex() == 1:
+            self.place_ref.addItem("Base del robot", -1)
+        for i, obj in enumerate(self.layout_data.objects):
+            if i != sel:
+                self.place_ref.addItem(f"«{obj.name}»", i)
+        index = self.place_ref.findData(current)
+        self.place_ref.setCurrentIndex(max(0, index))
+        self.place_ref.blockSignals(False)
+
+    def _on_piece_selected(self) -> None:
+        sel = self.selected_piece()
+        if sel is None:
+            self.place_title.setText("<b>Ubicar</b>: elegí una pieza en la tabla.")
+            self.place_info.setText("")
+            return
+        self.place_title.setText(f"<b>Ubicar «{self.layout_data.objects[sel].name}»</b>")
+        self._fill_refs()
+        self.place_info.setText(self._box_summary(sel))
+
+    def _box(self, index: int) -> placement.Box:
+        obj = self.layout_data.objects[index]
+        return placement.world_box(obj, self._mesh_for(obj.path))
+
+    def _box_summary(self, index: int) -> str:
+        """Lo que se puede saber al instante, con las cajas."""
+        try:
+            box = self._box(index)
+        except MeshError as e:
+            return str(e)
+        sx, sy, sz = box.size
+        parts = [f"Tamaño {sx:.0f} × {sy:.0f} × {sz:.0f} mm",
+                 f"apoyo en ({box.base[0]:.0f}, {box.base[1]:.0f}, {box.base[2]:.0f})",
+                 f"al eje del robot: <b>{placement.axis_distance(box):.0f} mm</b>"]
+        for i, other in enumerate(self.layout_data.objects):
+            if i == index:
+                continue
+            try:
+                g = placement.gaps(box, self._box(i))
+            except MeshError:
+                continue
+            free = [f"{'XYZ'[k]} {g[k]:.0f}" for k in range(3) if g[k] >= 0]
+            text = ", ".join(free) + " mm" if free else "las cajas se superponen"
+            parts.append(f"a «{other.name}»: {text}")
+        return " · ".join(parts)
+
+    def apply_placement(self) -> bool:
+        sel = self.selected_piece()
+        if sel is None:
+            self._report("warning", "Elegí en la tabla la pieza que querés ubicar.")
+            return False
+        obj = self.layout_data.objects[sel]
+        mode = self.place_mode.currentIndex()
+        try:
+            mesh = self._mesh_for(obj.path)
+            if mode == 0:
+                xyz = placement.from_robot(obj, mesh, self.place_distance.value(),
+                                           self.place_angle.value(),
+                                           to_face=self.place_to.currentIndex() == 0)
+            else:
+                ref_index = self.place_ref.currentData()
+                if ref_index is None:
+                    self._report("warning", "No hay otra pieza para tomar de referencia.")
+                    return False
+                ref = placement.ROBOT_BASE if ref_index == -1 else self._box(ref_index)
+                if mode == 1:
+                    xyz = placement.offset_from(obj, mesh, ref, self.place_dx.value(),
+                                                self.place_dy.value(), self.place_dz.value())
+                elif mode == 2:
+                    xyz = placement.next_to(obj, mesh, ref, self.place_side.currentText(),
+                                            self.place_gap.value())
+                else:
+                    xyz = placement.on_top(obj, mesh, ref, self.place_top_dx.value(),
+                                           self.place_top_dy.value())
+        except MeshError as e:
+            self._report("error", str(e))
+            return False
+        obj.x, obj.y, obj.z = xyz
+        self._refresh_objects(rebuild=False)
+        self.objects_table.selectRow(sel)
+        self._mark_collisions_stale("se movió una pieza")
+        self.place_info.setText(self._box_summary(sel))
+        return True
+
+    def measure_selected(self) -> str:
+        """Distancias mínimas reales (python-fcl) de la pieza elegida al robot
+        en la pose que se ve y a las demás piezas."""
+        sel = self.selected_piece()
+        if sel is None:
+            return ""
+        if not collision.available():
+            text = "Para medir entre superficies hace falta python-fcl. " + self._box_summary(sel)
+            self.place_info.setText(text)
+            return text
+        obj = self.layout_data.objects[sel]
+        try:
+            mesh = self._mesh_for(obj.path)
+        except MeshError as e:
+            self._report("error", str(e))
+            return ""
+        parts = []
+        if self.model is not None:
+            checker = self._measure_checker()
+            part, d = checker.robot_distance(
+                self.current_q, collision.Obstacle(obj.name, mesh, object_matrix(obj)))
+            parts.append(f"al robot (pose actual): <b>{d:.0f} mm</b> ({part})")
+        for i, other in enumerate(self.layout_data.objects):
+            if i == sel:
+                continue
+            try:
+                d = placement.clearance(obj, mesh, other, self._mesh_for(other.path))
+            except MeshError:
+                continue
+            parts.append(f"a «{other.name}»: <b>{d:.0f} mm</b>" if d else f"a «{other.name}»: se tocan")
+        text = f"Distancia mínima entre superficies de «{obj.name}»: " + " · ".join(parts)
+        self.place_info.setText(text)
+        return text
+
+    def _measure_checker(self):
+        key = (self.model.name, self.layout_data.tool_mesh, tuple(self.layout_data.tool_mount))
+        if self._measure_key != key:
+            self._measure_checker_obj = collision.CollisionChecker(
+                self.model, robot_link_meshes(self.model, tool_axis=False), [],
+                tool_mesh=self._tool_mesh(), tool_mount=self.layout_data.tool_mount,
+                margin_mm=0, floor=False, self_collision=False)
+            self._measure_key = key
+        return self._measure_checker_obj
 
     # -- choques -----------------------------------------------------------------------------
 
