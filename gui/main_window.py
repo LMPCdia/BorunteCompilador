@@ -6,6 +6,7 @@ puntos en el centro.
 
     ┌───────────────── menú + barra de herramientas ─────────────────┐
     │ Estructura   │ Programa │ Bytecode │ Puntos │ Pad │ Sim 3D │ Prop. │
+    │ del proyecto │ (.src · .dat · config.dat)          │             │
     │ del proyecto │                                    │             │
     ├──────────────┤                                    │             │
     │ Campos de    │                                    │             │
@@ -46,8 +47,9 @@ from PySide6.QtWidgets import (
 )
 
 from comms.robot_client import Pose
-from compiler.codegen import CompileError, compile_source
-from compiler.pad_codegen import PadOptions, compile_to_pad_report
+from compiler import program_files as pf
+from compiler.codegen import CompileError
+from compiler.pad_codegen import PadOptions
 from gui.connection_panel import ConnectionPanel
 from gui.message_window import MessageWindow
 from gui.project_tree import POSE_AXIS_NAMES, ProjectTree
@@ -134,13 +136,28 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
 
-        self.editor = QPlainTextEdit()
-        self.editor.setFont(QFont(MONOSPACE, 11))
-        self.editor.setPlainText(EXAMPLE_PROGRAM)
-        self.highlighter = DslSyntaxHighlighter(
-            self.editor.document(), qt_palette=self.editor.palette()
-        )
-        self.tabs.addTab(self.editor, "Programa")
+        # El programa son tres archivos (compiler/program_files.py): la lógica
+        # (.src), sus puntos (.dat) y los puntos comunes de la carpeta
+        # (config.dat). Un .krlb de antes es un solo archivo: entonces solo se
+        # ve el primero.
+        self.editor = self._make_editor()          # .src (o el .krlb entero)
+        self.dat_editor = self._make_editor()
+        self.config_editor = self._make_editor()
+        self.highlighter = self._highlighters[0]
+        self.program_tabs = QTabWidget()
+        self.program_tabs.setDocumentMode(True)
+        self.program_tabs.addTab(self.editor, "programa.src")
+        self.program_tabs.addTab(self.dat_editor, "programa.dat")
+        self.program_tabs.addTab(self.config_editor, pf.CONFIG_DAT)
+        self.program_tabs.setTabToolTip(0, "La lógica del programa: movimientos, esperas, "
+                                           "salidas, IF, PROC. Sin puntos.")
+        self.program_tabs.setTabToolTip(1, "Los puntos de este programa (solo POINT)")
+        self.program_tabs.setTabToolTip(2, "Puntos comunes a todos los programas de la "
+                                           "carpeta (HOME, poses de traslado...)")
+        self.tabs.addTab(self.program_tabs, "Programa")
+        self._split = True
+        self._src_name, self._dat_name = "programa.src", "programa.dat"
+        self._combined: pf.Combined | None = None
 
         self.bytecode_view = QPlainTextEdit()
         self.bytecode_view.setReadOnly(True)
@@ -159,11 +176,63 @@ class MainWindow(QMainWindow):
         # Simulación 3D del respaldo del pad (sim/). La vista 3D solo se crea
         # si hay OpenGL: ver gui/viewport3d.py.
         self._pending_reports: list[tuple[str, str]] = []
-        self.sim_view = SimView(self.editor.toPlainText, report=self._sim_report,
-                                clear_reports=lambda: self.messages.clear_source("simulador"))
+        self.sim_view = SimView(self.combined_source, report=self._sim_report,
+                                clear_reports=lambda: self.messages.clear_source("simulador"),
+                                compile_pad=lambda options: pf.compile_pad(
+                                    self.program_sources(), options))
         self.sim_tab = _scrollable(self.sim_view)
         self.tabs.addTab(self.sim_tab, "Simulación 3D")
-        self.editor.textChanged.connect(self.sim_view.source_changed)
+        for editor in self._editors():
+            editor.textChanged.connect(self.sim_view.source_changed)
+        self.set_sources(pf.split_single(EXAMPLE_PROGRAM, "programa.src"))
+
+    def _make_editor(self) -> QPlainTextEdit:
+        editor = QPlainTextEdit()
+        editor.setFont(QFont(MONOSPACE, 11))
+        if not hasattr(self, "_highlighters"):
+            self._highlighters: list[DslSyntaxHighlighter] = []
+        self._highlighters.append(DslSyntaxHighlighter(editor.document(),
+                                                       qt_palette=editor.palette()))
+        return editor
+
+    def _editors(self) -> list[QPlainTextEdit]:
+        return [self.editor, self.dat_editor, self.config_editor]
+
+    # -- el programa: .src + .dat + config.dat ------------------------------------
+
+    def program_sources(self) -> pf.ProgramSources:
+        src = pf.SourceFile(self._src_name, self.editor.toPlainText())
+        if not self._split:
+            return pf.ProgramSources(src)
+        return pf.ProgramSources(src, pf.SourceFile(self._dat_name, self.dat_editor.toPlainText()),
+                                 pf.SourceFile(pf.CONFIG_DAT, self.config_editor.toPlainText()))
+
+    def combined_source(self) -> str:
+        """El programa entero en un texto (lo que compila el simulador)."""
+        return pf.combine(self.program_sources()).text
+
+    def set_sources(self, sources: pf.ProgramSources) -> None:
+        """Muestra un programa: tres archivos, o uno solo (.krlb de antes)."""
+        self._split = sources.split
+        self._src_name = sources.src.name
+        self._dat_name = sources.dat.name if sources.dat else Path(sources.src.name).with_suffix(
+            pf.DAT_SUFFIX).name
+        texts = [sources.src.text, sources.dat.text if sources.dat else "",
+                 sources.config.text if sources.config else ""]
+        for editor, text in zip(self._editors(), texts):
+            editor.setPlainText(text)
+            editor.document().setModified(False)
+        self.program_tabs.setTabText(0, self._src_name)
+        self.program_tabs.setTabText(1, self._dat_name)
+        self.program_tabs.setTabVisible(1, self._split)
+        self.program_tabs.setTabVisible(2, self._split)
+        self.program_tabs.setCurrentIndex(0)
+        if hasattr(self, "act_split"):
+            self.act_split.setEnabled(not self._split)
+
+    def _show_editor(self, editor: QPlainTextEdit) -> None:
+        self.tabs.setCurrentWidget(self.program_tabs)
+        self.program_tabs.setCurrentWidget(editor)
 
     def _build_points_tab(self) -> QWidget:
         container = QWidget()
@@ -285,6 +354,10 @@ class MainWindow(QMainWindow):
         self.act_save = QAction(self._icon(sp.SP_DialogSaveButton), "&Guardar…", self)
         self.act_save.setShortcut(QKeySequence.StandardKey.Save)
 
+        self.act_split = QAction("Separar en .src y .dat", self)
+        self.act_split.setToolTip("Pasa los POINT de un programa de un solo archivo a su .dat")
+        self.act_split.setEnabled(not self._split)
+
         self.act_quit = QAction("&Salir", self)
         self.act_quit.setShortcut(QKeySequence.StandardKey.Quit)
 
@@ -320,6 +393,7 @@ class MainWindow(QMainWindow):
         m_file = bar.addMenu("&Archivo")
         m_file.addAction(self.act_open)
         m_file.addAction(self.act_save)
+        m_file.addAction(self.act_split)
         m_file.addSeparator()
         m_file.addAction(self.act_quit)
 
@@ -377,6 +451,7 @@ class MainWindow(QMainWindow):
     def _connect_signals(self) -> None:
         self.act_open.triggered.connect(self._on_open)
         self.act_save.triggered.connect(self._on_save)
+        self.act_split.triggered.connect(self.split_program)
         self.act_quit.triggered.connect(self.close)
         self.act_compile.triggered.connect(self._on_compile)
         self.act_run.triggered.connect(self._on_run)
@@ -395,7 +470,9 @@ class MainWindow(QMainWindow):
         )
 
         self.work_fields.field_changed.connect(self._apply_work_field)
-        self.editor.cursorPositionChanged.connect(self._refresh_cursor_label)
+        for editor in self._editors():
+            editor.cursorPositionChanged.connect(self._refresh_cursor_label)
+        self.program_tabs.currentChanged.connect(lambda _i: self._refresh_cursor_label())
         self.connection_panel.connect_btn.clicked.connect(self._refresh_connection_label)
 
     # -- campos de trabajo ------------------------------------------------------
@@ -410,23 +487,88 @@ class MainWindow(QMainWindow):
 
     def _on_open(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Abrir programa", filter="Borunte DSL (*.krlb *.txt);;Todos (*)"
-        )
+            self, "Abrir programa",
+            filter="Programa (*.src *.dat);;Un solo archivo (*.krlb *.txt);;Todos (*)")
         if path:
-            with open(path, encoding="utf-8") as f:
-                self.editor.setPlainText(f.read())
-            self._current_path = Path(path)
-            self.messages.info(f"Abierto {path}", "archivo")
+            self.open_program(path)
+
+    def open_program(self, path: str | Path) -> bool:
+        """Un .src (o su .dat) abre los tres archivos; un .krlb, uno solo."""
+        try:
+            sources = pf.load(path)
+        except (OSError, UnicodeDecodeError) as e:
+            self.messages.error(f"No se pudo abrir {Path(path).name}: {e}", "archivo")
+            self._show_messages_dock()
+            return False
+        self.set_sources(sources)
+        self._current_path = (pf.paths_for(path)[0] if sources.split else Path(path))
+        names = ", ".join(f.name for f in sources.files())
+        self.messages.info(f"Abierto {self._current_path.parent}: {names}", "archivo")
+        return True
 
     def _on_save(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Guardar programa", filter="Borunte DSL (*.krlb);;Todos (*)"
-        )
+        start = str(self._current_path) if self._current_path else (
+            self._src_name if self._split else "programa.krlb")
+        filters = ("Programa (*.src);;Un solo archivo (*.krlb)" if self._split
+                   else "Un solo archivo (*.krlb);;Programa .src + .dat (*.src)")
+        path, chosen = QFileDialog.getSaveFileName(self, "Guardar programa", start, filters)
         if path:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(self.editor.toPlainText())
-            self._current_path = Path(path)
-            self.messages.info(f"Guardado {path}", "archivo")
+            self.save_program(path)
+
+    def save_program(self, path: str | Path) -> bool:
+        """`.src`: escribe el .src, su .dat y config.dat. Otra extensión: el
+        programa entero en un solo archivo (como antes)."""
+        path = Path(path)
+        try:
+            if path.suffix.lower() not in (pf.SRC_SUFFIX, pf.DAT_SUFFIX):
+                path.write_text(self.combined_source() if self._split else self.editor.toPlainText(),
+                                encoding="utf-8")
+                written = [path]
+                if self._split:      # ahora es un solo archivo: se muestra así
+                    self.set_sources(pf.load(path))
+            else:
+                path = pf.paths_for(path)[0]
+                if not self._split:  # un .krlb guardado como .src: se separa
+                    self.set_sources(pf.split_single(self.editor.toPlainText(), path.name))
+                written = self._save_split(path)
+        except OSError as e:
+            self.messages.error(f"No se pudo guardar: {e}", "archivo")
+            self._show_messages_dock()
+            return False
+        self._current_path = path
+        self.messages.info("Guardado: " + ", ".join(str(p) for p in written), "archivo")
+        return True
+
+    def _save_split(self, src_path: Path) -> list[Path]:
+        """config.dat es de toda la carpeta: se escribe si se editó acá, o si
+        en la carpeta todavía no hay uno. Si hay uno distinto y acá no se
+        tocó, manda el de la carpeta (lo puede haber cambiado otro programa)."""
+        _src, dat, config = pf.paths_for(src_path)
+        config_text = self.config_editor.toPlainText()
+        modified = self.config_editor.document().isModified()
+        write_config = modified or (not config.exists() and config_text.strip() != "")
+        self._src_name, self._dat_name = src_path.name, dat.name
+        written = pf.save(self.program_sources(), src_path, write_config=write_config)
+        if not write_config and config.exists() and config.read_text(encoding="utf-8") != config_text:
+            self.config_editor.setPlainText(config.read_text(encoding="utf-8"))
+            self.messages.warning(f"{config} ya tenía otros puntos: se usa ese config.dat.",
+                                  "archivo")
+        for editor in self._editors():
+            editor.document().setModified(False)
+        self.program_tabs.setTabText(0, self._src_name)
+        self.program_tabs.setTabText(1, self._dat_name)
+        return written
+
+    def split_program(self) -> None:
+        """Un programa de un solo archivo -> .src (lógica) + .dat (puntos)."""
+        if self._split:
+            return
+        name = (self._current_path.stem if self._current_path else "programa") + pf.SRC_SUFFIX
+        self.set_sources(pf.split_single(self.editor.toPlainText(), name))
+        if self._current_path is not None:
+            self._current_path = self._current_path.with_suffix(pf.SRC_SUFFIX)
+        self.messages.info(f"Separado en {self._src_name} y {self._dat_name}. Guardalo para "
+                           f"escribir los archivos.", "archivo")
 
     def _on_about(self) -> None:
         QMessageBox.about(
@@ -442,9 +584,9 @@ class MainWindow(QMainWindow):
     # -- compilar ---------------------------------------------------------------
 
     def _on_compile(self) -> None:
-        source = self.editor.toPlainText()
+        sources = self.program_sources()
         try:
-            program = compile_source(source)
+            program, warnings = pf.compile_vm(sources)
         except CompileError as e:
             self._program = None
             self.messages.error(str(e), "compilador")
@@ -459,9 +601,12 @@ class MainWindow(QMainWindow):
             return
 
         self._program = program
+        self._combined = pf.combine(sources)
         self.bytecode_view.setPlainText(program.dump())
         self._populate_points_table()
-        self.project_tree.rebuild(program, source)
+        self.project_tree.rebuild(program, self._combined.text)
+        for warning in warnings:
+            self.messages.warning(warning, "compilador")
         self.messages.info(
             f"Compilado: {len(program.instructions)} instrucciones, "
             f"{len(program.points)} puntos, {len(program.proc_addresses)} procedimientos.",
@@ -510,11 +655,10 @@ class MainWindow(QMainWindow):
     def export_to_pad(self, directory: str | Path) -> Path | None:
         """Compila para el pad y escribe el respaldo en `directory`. Devuelve la
         ruta, o None si no compiló (el error queda en la ventana de mensajes)."""
-        source = self.editor.toPlainText()
         options = PadOptions(program_name=self.pad_program_name(),
                              allow_unverified=self.act_allow_unverified.isChecked())
         try:
-            backup, warnings = compile_to_pad_report(source, options)
+            backup, warnings = pf.compile_pad(self.program_sources(), options)
         except CompileError as e:
             self.messages.error(f"No se puede exportar al pad: {e}", "pad")
             self._show_messages_dock()
@@ -711,13 +855,22 @@ class MainWindow(QMainWindow):
 
         lines = [self.point_declaration(name, pose) for name, pose in self._digitized]
         block = "\n".join(lines) + "\n"
-        cursor = self.editor.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.StartOfLine)
+        # Con el programa separado, los puntos van al .dat (al final); si es
+        # un solo archivo, donde está el cursor.
+        target = self.dat_editor if self._split else self.editor
+        cursor = target.textCursor()
+        if self._split:
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            if target.toPlainText() and not target.toPlainText().endswith("\n"):
+                block = "\n" + block
+        else:
+            cursor.movePosition(QTextCursor.MoveOperation.StartOfLine)
         cursor.insertText(block)
+        where = self._dat_name if self._split else "el editor"
         self.messages.info(
-            f"Insertadas {len(lines)} declaraciones POINT en el editor.", "digitalizar"
+            f"Insertadas {len(lines)} declaraciones POINT en {where}.", "digitalizar"
         )
-        self.tabs.setCurrentWidget(self.editor)
+        self._show_editor(target)
 
     @staticmethod
     def point_declaration(name: str, pose: Pose) -> str:
@@ -729,16 +882,25 @@ class MainWindow(QMainWindow):
     # -- navegación y estado ------------------------------------------------------
 
     def _goto_line(self, line: int) -> None:
-        block = self.editor.document().findBlockByLineNumber(line - 1)
+        """`line`: del programa compilado (los tres archivos juntos)."""
+        editor = self.editor
+        where = self._combined.locate(line) if self._combined is not None else None
+        if where is not None:
+            name, line = where
+            editor = {self._dat_name: self.dat_editor,
+                      pf.CONFIG_DAT: self.config_editor}.get(name, self.editor)
+        block = editor.document().findBlockByLineNumber(line - 1)
         if not block.isValid():
             return
-        cursor = QTextCursor(block)
-        self.editor.setTextCursor(cursor)
-        self.tabs.setCurrentWidget(self.editor)
-        self.editor.setFocus()
+        editor.setTextCursor(QTextCursor(block))
+        self._show_editor(editor)
+        editor.setFocus()
 
     def _refresh_cursor_label(self) -> None:
-        cursor = self.editor.textCursor()
+        editor = self.program_tabs.currentWidget()
+        if not isinstance(editor, QPlainTextEdit):
+            editor = self.editor
+        cursor = editor.textCursor()
         self.status_cursor.setText(
             f"Línea {cursor.blockNumber() + 1}, Col {cursor.positionInBlock() + 1}"
         )

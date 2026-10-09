@@ -2,8 +2,9 @@
 
 ## Resumen
 
-El programa se escribe en la PC en un lenguaje tipo KRL (`.krlb`), se
-compila a un **respaldo del pad** (`HCBackupRobot_<fecha>.zip`) y se importa
+El programa se escribe en la PC en un lenguaje tipo KRL (`.src` con la
+lógica + `.dat` con sus puntos + `config.dat` con los puntos comunes de la
+carpeta; o todo en un `.krlb`, como antes), se compila a un **respaldo del pad** (`HCBackupRobot_<fecha>.zip`) y se importa
 en el teach pendant del Borunte por pendrive. A partir de ahí **lo ejecuta el
 controlador del robot solo**, con sus propias E/S: no hay PLC ni PC en el
 lazo de ejecución.
@@ -11,7 +12,8 @@ lazo de ejecución.
 ```
 ┌───────────────────────── PC ──────────────────────────┐
 │                                                        │
-│  DSL (.krlb)                                           │
+│  DSL (.src + .dat + config.dat, o un .krlb)            │
+│    │  compiler/program_files.py: los junta y revisa    │
 │    │  parser (Lark) — compiler/grammar.lark            │
 │    ▼                                                   │
 │  AST — compiler/ast_nodes.py                           │
@@ -81,3 +83,33 @@ el programa del pad en bloque; por eso la vía es el respaldo por pendrive.
       la entrada está en OFF".
 - [ ] Cómo se expresan en el pad: espera de entrada, salto incondicional,
       variables.
+
+
+## Archivos del programa (`compiler/program_files.py`)
+
+Como en KUKA, un programa son dos archivos con el mismo nombre, más uno común
+a la carpeta:
+
+| Archivo | Qué tiene |
+|---|---|
+| `paletizado.src` | la lógica: movimientos, velocidades, esperas, salidas, IF, PROC. **Sin puntos** |
+| `paletizado.dat` | los puntos de ese programa: **solo** `POINT` (y comentarios) |
+| `config.dat` | puntos comunes a todos los programas de la carpeta (HOME, poses de traslado…). Opcional |
+
+- Se compilan juntos en ese orden (config.dat, .dat, .src); los errores y
+  avisos dicen archivo y línea («paletizado.src, línea 12: …»).
+- Errores: algo que no sea `POINT` en un `.dat`; un `POINT` en el `.src`
+  (también dentro de un PROC o un IF); el mismo nombre de punto en
+  config.dat y en el `.dat`.
+- Aviso: un punto del `.dat` que el `.src` no usa (los de config.dat no
+  avisan: son para varios programas).
+- El respaldo del pad **no cambia**: ahí cada movimiento lleva su punto
+  adentro (ver `docs/PAD_FORMAT.md`). La separación es solo de la PC.
+- Un `.krlb` de antes (todo junto) se abre y compila igual; *Archivo →
+  Separar en .src y .dat* lo convierte, y guardarlo como `.src` también.
+- GUI: la pestaña Programa tiene una sub-pestaña por archivo. Guardar como
+  `.src` escribe el `.src` y su `.dat`; `config.dat` se escribe solo si se
+  editó o si la carpeta todavía no tiene uno (si la carpeta tiene uno
+  distinto y no se tocó, manda el de la carpeta: lo puede haber cambiado otro
+  programa). Los puntos digitalizados (F8) se agregan al final del `.dat`.
+- `python -m sim.check paletizado.src` simula el programa con sus `.dat`.

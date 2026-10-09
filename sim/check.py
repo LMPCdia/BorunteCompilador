@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 from compiler.codegen import CompileError
-from compiler.pad_codegen import PadOptions, compile_to_pad_report, io_point
+from compiler.pad_codegen import PadOptions, io_point
 from pad.backup import PadBackup
 from sim import collision
 from sim.kinematics import RobotModel, rot_axis
@@ -74,7 +74,8 @@ def check_collisions(result: SimResult, model: RobotModel, layout: Layout) -> li
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m sim.check", description=__doc__.split("\n")[1])
-    parser.add_argument("archivo", help=".krlb o HCBackupRobot_*.zip")
+    parser.add_argument("archivo", help=".src (con su .dat y config.dat), .krlb o "
+                                        "HCBackupRobot_*.zip")
     parser.add_argument("--model", choices=RobotModel.available(),
                         help="por defecto, el de la celda (--layout) o el BRTIRUS1510A")
     parser.add_argument("--input", action="append", default=[], metavar="X012=1",
@@ -90,8 +91,10 @@ def main(argv: list[str] | None = None) -> int:
             backup = PadBackup.read(path)
         else:
             # Simular no tiene riesgo: se permite lo "sin confirmar".
-            backup, warnings = compile_to_pad_report(
-                path.read_text(encoding="utf-8"), PadOptions(allow_unverified=True))
+            from compiler import program_files
+
+            backup, warnings = program_files.compile_pad(program_files.load(path),
+                                                         PadOptions(allow_unverified=True))
             for warning in warnings:
                 print(f"Aviso: {warning}")
         inputs = {}

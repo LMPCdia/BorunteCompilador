@@ -56,6 +56,10 @@ respaldo real; la lógica se prueba contra `comms/robot_simulator.py`.
 - **`compiler/pad_codegen.py`**: AST -> respaldo del pad. `MOVEJ` exige punto
   `JOINT(...)` y `MOVEL` `WORLD(...)`. Sin `VAR`, `ELSE`, `WAIT_IN` ni
   parámetros (error de compilación).
+- **`compiler/program_files.py`**: el programa es `<nombre>.src` (lógica,
+  sin POINT) + `<nombre>.dat` (solo POINT) + `config.dat` (puntos comunes de
+  la carpeta); se juntan para compilar y los errores dicen archivo y línea.
+  Un `.krlb` (todo junto) sigue andando. El respaldo del pad no cambia.
 - **`compiler/codegen.py` + `runtime/vm.py`**: bytecode y VM de referencia,
   solo para simular la lógica en la PC.
 - **`comms/robot_client.py`**: Modbus del robot, para digitalizar puntos y

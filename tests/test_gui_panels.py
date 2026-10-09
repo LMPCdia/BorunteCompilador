@@ -150,8 +150,11 @@ def test_group_nodes_have_no_line_and_do_not_navigate(app, program):
 
 
 def test_main_window_moves_the_cursor_to_the_declaration(app):
+    """Programa de un solo archivo (.krlb de antes): la línea es la del editor."""
+    from compiler import program_files as pf
+
     window = MainWindow()
-    window.editor.setPlainText(PROGRAMA)
+    window.set_sources(pf.ProgramSources(pf.SourceFile("viejo.krlb", PROGRAMA)))
     window._on_compile()
 
     puntos = window.project_tree.topLevelItem(0)
@@ -161,7 +164,25 @@ def test_main_window_moves_the_cursor_to_the_declaration(app):
 
     window.project_tree.itemClicked.emit(p_pieza, 0)
     assert window.editor.textCursor().blockNumber() + 1 == 2
-    assert window.tabs.currentWidget() is window.editor
+    assert window.tabs.currentWidget() is window.program_tabs
+    assert window.program_tabs.currentWidget() is window.editor
+
+
+def test_main_window_goes_to_the_point_in_the_dat(app):
+    """Programa separado: el punto se declara en el .dat y el clic va ahí."""
+    from compiler import program_files as pf
+
+    window = MainWindow()
+    sources = pf.split_single(PROGRAMA, "pieza.src")
+    window.set_sources(sources)
+    window._on_compile()
+    assert window._program is not None
+
+    p_pieza = window.project_tree.topLevelItem(0).child(1)
+    window.project_tree.itemClicked.emit(p_pieza, 0)
+    assert window.program_tabs.currentWidget() is window.dat_editor
+    line = window.dat_editor.textCursor().block().text()
+    assert line.startswith("POINT p_pieza")
 
 
 # --- propiedades ------------------------------------------------------------------

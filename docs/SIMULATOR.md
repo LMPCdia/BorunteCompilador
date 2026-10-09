@@ -12,7 +12,7 @@ geométrico del robot y avisa, antes de llevar el programa al robot:
 - tiempo de ciclo **estimado**.
 
 ```bash
-python -m sim.check programa.krlb
+python -m sim.check programa.src          # o un .krlb, o un HCBackupRobot_*.zip
 python -m sim.check HCBackupRobot_*.zip --model BRTIRUS1820A --input X012=1
 ```
 

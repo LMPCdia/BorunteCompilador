@@ -367,7 +367,7 @@ def test_check_cli_reports_compile_errors_without_traceback(tmp_path, capsys):
     src = tmp_path / "p.krlb"
     src.write_text("MOVEJ nada SPEED 10\n", encoding="utf-8")
     assert check_main([str(src)]) == 2
-    assert "Línea 1" in capsys.readouterr().err
+    assert "p.krlb, línea 1" in capsys.readouterr().err
 
 
 def test_after_an_out_of_range_failure_the_rest_is_still_evaluated(model):

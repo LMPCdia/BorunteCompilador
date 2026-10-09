@@ -245,9 +245,14 @@ class PoseTable(QWidget):
 class SimView(QWidget):
     def __init__(self, get_source: Callable[[], str], report: Reporter | None = None,
                  enable_3d: bool | None = None,
-                 clear_reports: Callable[[], None] | None = None) -> None:
+                 clear_reports: Callable[[], None] | None = None,
+                 compile_pad: Callable[[PadOptions], tuple] | None = None) -> None:
         super().__init__()
         self._get_source = get_source
+        # Programa del editor -> (respaldo, avisos). La ventana principal pasa
+        # uno que junta .src, .dat y config.dat y dice archivo y línea.
+        self._compile_pad = compile_pad or (
+            lambda options: compile_to_pad_report(self._get_source(), options))
         self._report = report or (lambda _severity, _msg: None)
         self._clear_reports = clear_reports or (lambda: None)
         self.layout_data = Layout()
@@ -954,8 +959,7 @@ class SimView(QWidget):
         self.backup = None
         self.backup_path = None
         try:
-            self._refresh_inputs(compile_to_pad_report(self._get_source(),
-                                                       PadOptions(allow_unverified=True))[0])
+            self._refresh_inputs(self._compile_pad(PadOptions(allow_unverified=True))[0])
         except Exception:  # noqa: BLE001 — si el editor no compila, se ve al simular
             pass
         self.source_label.setText("Programa: el del editor")
@@ -966,8 +970,7 @@ class SimView(QWidget):
         if self.backup is not None:
             return self.backup
         # En la simulación se permite lo "sin confirmar": acá no hay riesgo.
-        backup, warnings = compile_to_pad_report(self._get_source(),
-                                                 PadOptions(allow_unverified=True))
+        backup, warnings = self._compile_pad(PadOptions(allow_unverified=True))
         for warning in warnings:
             self._report("info", f"[compilador] {warning}")
         self._refresh_inputs(backup)
