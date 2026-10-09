@@ -67,7 +67,9 @@ respaldo real; la lógica se prueba contra `comms/robot_simulator.py`.
   (cilindros, del plano). Pestaña "Simulación 3D" con layout de
   piezas STEP/STL/OBJ y búsqueda de choques (`sim/collision.py`, python-fcl:
   piezas como sólidos, piso, el propio brazo, herramienta montada en la
-  brida). Ver `docs/SIMULATOR.md`.
+  brida), gráficas de movimiento (perfil de aceleración supuesto), navegación
+  tipo Inventor, ubicación de piezas por distancias y biblioteca en línea de
+  Google Drive (`sim/library.py`). Ver `docs/SIMULATOR.md`.
 - **GUI** (`gui/`): "Exportar para el pad" (Ctrl+E) + pestaña "Pad" con el
   listado; compilar/ejecutar en la VM; digitalizar puntos.
 - **`packaging/`** + `.github/workflows/build-exe.yml`: `.exe` de un solo

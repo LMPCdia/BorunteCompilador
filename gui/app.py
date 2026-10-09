@@ -224,6 +224,23 @@ def _self_test() -> int:
 
     paso("gráficas de movimiento (QtCharts)", graficas)
 
+    def biblioteca():
+        # La biblioteca baja de Google Drive por HTTPS: el .exe necesita ssl y
+        # los certificados del sistema (sin conectarse acá: el self-test no
+        # depende de la red).
+        import ssl
+
+        from sim import library
+
+        ssl.create_default_context()
+        assert library.folder_id(f"https://drive.google.com/drive/folders/"
+                                 f"{library.DEFAULT_FOLDER}") == library.DEFAULT_FOLDER
+        html = ('<div class="flip-entry" id="entry-ABC"><a href="https://drive.google.com/'
+                'file/d/ABC/view"><div class="flip-entry-title">mesa.step</div></a></div>')
+        assert library.parse_folder(html)[0].name == "mesa.step"
+
+    paso("biblioteca de Google Drive (HTTPS)", biblioteca)
+
     _emit()
     fallas = 0
     for nombre, ok, detalle in pasos:

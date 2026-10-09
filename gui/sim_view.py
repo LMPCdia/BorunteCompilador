@@ -488,6 +488,15 @@ class SimView(QWidget):
         tabs.addTab(_vscroll(objects), "Piezas")
         tabs.addTab(_vscroll(self._build_collisions()), "Choques")
         tabs.addTab(self.tools_table, "Herramientas")
+        from gui.library_view import LibraryPanel
+
+        self.library = LibraryPanel(on_insert=self._insert_from_library,
+                                    on_tool=self._tool_from_library,
+                                    on_robot=self.use_robot, report=self._report,
+                                    settings=self._settings)
+        self.library_tab_index = tabs.addTab(self.library, "Biblioteca")
+        tabs.currentChanged.connect(
+            lambda i: self.library.ensure_loaded() if i == self.library_tab_index else None)
         tabs.addTab(self.frames_table, "Coordenadas")
         self.side_tabs = tabs
 
@@ -698,6 +707,52 @@ class SimView(QWidget):
             self._report("error", f"Herramienta: {e}")
             return None
 
+    def _insert_from_library(self, path: Path, item) -> None:
+        obj = self.import_object(path)
+        if obj is not None:
+            obj.name = Path(item.name).stem
+            obj.drive_id = item.file_id
+            self._refresh_objects(rebuild=False)
+            self.objects_table.selectRow(len(self.layout_data.objects) - 1)
+            self.side_tabs.setCurrentIndex(1)       # a Piezas, para ubicarla
+
+    def _tool_from_library(self, path: Path, item) -> None:
+        if self.set_tool_mesh(path):
+            self.layout_data.tool_drive_id = item.file_id
+
+    def _fetch_missing(self) -> None:
+        """Piezas de la biblioteca que en esta PC no están bajadas: se bajan."""
+        from sim.library import LibraryError
+
+        wanted = [(obj, "path", obj.drive_id) for obj in self.layout_data.objects if obj.drive_id]
+        if self.layout_data.tool_drive_id:
+            wanted.append((self.layout_data, "tool_mesh", self.layout_data.tool_drive_id))
+        for owner, attr, drive_id in wanted:
+            current = getattr(owner, attr)
+            if current and Path(current).exists():
+                continue
+            name = Path(current).name if current else drive_id
+            QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                setattr(owner, attr, str(self.library.fetch_by_id(drive_id, name)))
+            except LibraryError as e:
+                self._report("warning", f"No se pudo bajar «{name}» de la biblioteca: {e}")
+            finally:
+                QGuiApplication.restoreOverrideCursor()
+
+    def use_robot(self, name: str) -> bool:
+        """Elegir un robot (p. ej. recién importado de la biblioteca)."""
+        names = RobotModel.available()
+        if name not in names:
+            self._report("error", f"El robot {name} no está instalado.")
+            return False
+        self.model_combo.blockSignals(True)
+        self.model_combo.clear()
+        self.model_combo.addItems(names)
+        self.model_combo.setCurrentText(name)
+        self.model_combo.blockSignals(False)
+        return self.set_model(name)
+
     # -- qué se simula ------------------------------------------------------------------
 
     def open_backup(self, path: str | Path) -> bool:
@@ -897,6 +952,7 @@ class SimView(QWidget):
         self._cancel = True
         if self.charts is not None:
             self.charts.close()
+        self.library.shutdown()
 
     def source_changed(self) -> None:
         """El programa del editor (quizás) cambió. Se compara el texto: el
@@ -1235,6 +1291,7 @@ class SimView(QWidget):
             return False
         self.layout_data = layout
         self.layout_path = Path(path)
+        self._fetch_missing()
         if layout.model in RobotModel.available():
             self.model_combo.setCurrentText(layout.model)
         else:
@@ -1510,6 +1567,7 @@ class SimView(QWidget):
                 self._report("error", f"Herramienta: {e}")
                 return False
         self.layout_data.tool_mesh = path
+        self.layout_data.tool_drive_id = ""
         self._show_tool_mesh()
         if self.viewport is not None and self.model is not None:
             self.viewport.set_robot(self._robot_meshes(self.model))

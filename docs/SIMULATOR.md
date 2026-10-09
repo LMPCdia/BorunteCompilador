@@ -62,6 +62,34 @@ Los STEP se convierten a triángulos con **gmsh** (dependencia nueva, trae
 OpenCascade; suma ~60 MB al `.exe`). La malla es gruesa a propósito: alcanza
 para ver la celda, no para medir.
 
+## Biblioteca de Google Drive (`sim/library.py`, `gui/library_view.py`)
+
+Pestaña **Biblioteca**: lee EN LÍNEA la carpeta de Drive (por defecto
+*RobotsBoruntesSimulador*; se puede pegar el enlace de otra), sin cuenta de
+Google: la carpeta tiene que estar compartida como **«Cualquier persona con
+el enlace»**. Se lee al abrir la pestaña y con *Actualizar*.
+
+Clasificación **por carpeta** (no por nombre de archivo):
+
+| Carpeta | Tipo | Doble clic / botón |
+|---|---|---|
+| `Robots/…` o un STEP cuyo nombre diga `BRTIRUSxxxx` | robot | *Usar este robot*: lo importa del STEP (un par de minutos, `sim/robot_import.py`) y lo elige |
+| `Herramientas`, `Grippers`, `Pinzas`, `Antorchas`, `Ventosas`… | herramienta | *Montar en la brida* |
+| cualquier otra (`Bases`, `Mesas`, `Piezas`…) | pieza | *Insertar en la celda* (queda elegida para ubicarla) |
+
+- Formatos: STEP, STL, OBJ. Los nativos (SolidWorks `.SLDPRT`, Inventor
+  `.ipt`…) se cuentan y se avisa que hay que exportarlos a STEP.
+- Los archivos se bajan al usarlos a `~/BorunteDSL/biblioteca/<id>/` y se
+  vuelven a bajar solo si en Drive cambió el tamaño o la fecha. Sin red, se
+  usa lo ya bajado.
+- La celda guarda el ID de Drive de cada pieza y de la herramienta: abierta
+  en otra PC, las baja sola.
+- Un robot nuevo se importa con los rangos y velocidades del BRTIRUS1510A
+  (hipótesis, se avisa): hay que reemplazarlos por su tabla en
+  `~/BorunteDSL/modelos/<MODELO>.json`.
+- Límite: la vista web de Drive muestra hasta unos cientos de archivos por
+  carpeta.
+
 ## Gráficas de movimiento (`sim/motion.py`, `gui/motion_charts.py`)
 
 Botón **Gráficas…** (o *Simulación → Gráficas de movimiento*, Ctrl+G):

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -276,14 +277,39 @@ def write_model(robot: ImportedRobot, name: str, folder: Path, joints: list[dict
 SIMPLIFY_MM = [6.0, 6.0, 6.0, 6.0, 6.0, 3.0, 2.0]
 
 
+def import_robot_step(step: str | Path, name: str, out_dir: str | Path, joints_from: str,
+                      progress=None) -> tuple[Path, ImportedRobot]:
+    """Todo el camino: ensamble STEP -> `<out_dir>/<name>.json` + mallas.
+    Tira ValueError, OSError o MeshError con un mensaje para el usuario."""
+    from sim.kinematics import RobotModel, model_path
+    from sim.meshes import simplify
+    from sim.step_assembly import split_assembly
+
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+        raise ValueError(f"nombre de modelo inválido: {name!r}")
+    source = json.loads(model_path(joints_from).read_text(encoding="utf-8"))
+    RobotModel.load(joints_from)
+    parts = split_assembly(step, progress=progress)
+    robot = import_robot(parts)
+    robot.links = [simplify(m, c) for m, c in zip(robot.links, SIMPLIFY_MM)]
+    skipped = sum(p.mesh.skipped_faces for p in parts)
+    notes = (f"Cotas y mallas medidas del ensamble STEP del fabricante ({Path(step).name}); "
+             f"pose del ensamble {robot.cad_pose_deg}. {' '.join(robot.notes)} "
+             f"Rangos, velocidades y sentidos de giro copiados de {joints_from}: HIPÓTESIS, "
+             f"reemplazar por la tabla del robot. Cero de J6: hipótesis (la brida es simétrica).")
+    if skipped:
+        notes += f" {skipped} cara(s) del CAD no se pudieron mallar y faltan."
+    path = write_model(robot, name, Path(out_dir), source["joints"], notes)
+    return path, robot
+
+
 def main(argv: list[str] | None = None) -> int:
     """python -m sim.robot_import ENSAMBLE.step --name BRTIRUSxxxxA --joints-from BRTIRUS1510A"""
     import argparse
     import sys
 
-    from sim.kinematics import USER_MODELS_DIR, RobotModel, model_path
-    from sim.meshes import MeshError, simplify
-    from sim.step_assembly import split_assembly
+    from sim.kinematics import USER_MODELS_DIR
+    from sim.meshes import MeshError
 
     parser = argparse.ArgumentParser(prog="python -m sim.robot_import",
                                      description="Modelo de robot desde el ensamble STEP del fabricante")
@@ -297,23 +323,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        source = json.loads(model_path(args.joints_from).read_text(encoding="utf-8"))
-        RobotModel.load(args.joints_from)
         print(f"Leyendo {args.step} (puede tardar unos minutos)…")
-        parts = split_assembly(args.step, progress=lambda i, n, name: print(f"  {i + 1}/{n} {name}"))
-        robot = import_robot(parts)
+        path, robot = import_robot_step(args.step, args.name, args.out, args.joints_from,
+                                        progress=lambda i, n, name: print(f"  {i + 1}/{n} {name}"))
     except (OSError, ValueError, MeshError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 2
-    robot.links = [simplify(m, c) for m, c in zip(robot.links, SIMPLIFY_MM)]
-    skipped = sum(p.mesh.skipped_faces for p in parts)
-    notes = (f"Cotas y mallas medidas del ensamble STEP del fabricante ({Path(args.step).name}); "
-             f"pose del ensamble {robot.cad_pose_deg}. {' '.join(robot.notes)} "
-             f"Rangos, velocidades y sentidos de giro copiados de {args.joints_from}: HIPÓTESIS, "
-             f"reemplazar por la tabla del robot. Cero de J6: hipótesis (la brida es simétrica).")
-    if skipped:
-        notes += f" {skipped} cara(s) del CAD no se pudieron mallar y faltan."
-    path = write_model(robot, args.name, Path(args.out), source["joints"], notes)
     g = robot.geometry
     print(f"Listo: {path}")
     print(f"  d1={g['d1']} a1={g['a1']} a2={g['a2']} a3={g['a3']} d4={g['d4']} d6={g['d6']} "

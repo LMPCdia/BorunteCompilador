@@ -92,6 +92,7 @@ class LayoutObject:
     # La herramienta trabaja sobre esta pieza (p. ej. la que se suelda): para la
     # herramienta solo cuenta tocarla, no acercarse. El brazo usa el margen igual.
     workpiece: bool = False
+    drive_id: str = ""        # vino de la biblioteca de Drive: en otra PC se vuelve a bajar
 
 
 @dataclass
@@ -106,6 +107,7 @@ class Layout:
     tools: dict[int, list[float]] = field(default_factory=dict)
     frames: dict[int, list[float]] = field(default_factory=dict)
     tool_mesh: str = ""                       # STEP/STL/OBJ de la antorcha, pinza, etc.
+    tool_drive_id: str = ""                   # si vino de la biblioteca de Drive
     tool_mount: list[float] = field(default_factory=lambda: [0.0] * 6)
     margin_mm: float = 20.0
     collisions: bool = True                   # buscar choques al simular
@@ -118,6 +120,7 @@ class Layout:
             "margin_mm": self.margin_mm,
             "tool_mesh": _relative(self.tool_mesh, path) if self.tool_mesh else "",
             "tool_mount": list(self.tool_mount),
+            "tool_drive_id": self.tool_drive_id,
             # Claves como texto: JSON no tiene claves numéricas.
             "tools": {str(k): list(v) for k, v in sorted(self.tools.items())},
             "frames": {str(k): list(v) for k, v in sorted(self.frames.items())},
@@ -160,6 +163,7 @@ class Layout:
         return cls(model=data.get("model", "BRTIRUS1820A"), objects=objects,
                    tools=poses("tools"), frames=poses("frames"), tool_mesh=tool_mesh,
                    tool_mount=mount, margin_mm=margin,
+                   tool_drive_id=str(data.get("tool_drive_id", "")),
                    collisions=bool(data.get("collisions", True)))
 
 
