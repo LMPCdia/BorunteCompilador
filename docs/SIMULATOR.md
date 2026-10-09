@@ -84,7 +84,7 @@ choque de prueba.
 
 | Modelo | Forma | Cotas | Rangos y velocidades |
 |---|---|---|---|
-| **BRTIRUS1510A** (el de la celda, por defecto) | mallas del fabricante | medidas del STEP del fabricante: alcance 1511 mm | tabla "Basic Parameters" (sin modelo indicado: **confirmar**) |
+| **BRTIRUS1510A** (el de la celda, por defecto) | mallas del fabricante | medidas del STEP del fabricante: alcance 1511 mm | tabla "Basic Parameters": velocidades confirmadas por el usuario; rangos **sin confirmar** |
 | BRTIRUS1820A | cilindros aproximados | plano "BASIC SIZE" | la misma tabla |
 
 ### Importar un robot desde el STEP del fabricante

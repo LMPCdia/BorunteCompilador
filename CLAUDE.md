@@ -62,8 +62,8 @@ respaldo real; la lógica se prueba contra `comms/robot_simulator.py`.
   simular contra el robot real.
 - **`sim/`**: simulador cinemático del respaldo del pad. Robot por defecto:
   **BRTIRUS1510A** (el de la celda), con cotas y mallas sacadas del STEP del
-  fabricante (`python -m sim.robot_import`). Sus rangos y velocidades son de
-  una tabla sin modelo indicado: confirmar. También está el BRTIRUS1820A
+  fabricante (`python -m sim.robot_import`). Velocidades confirmadas por el usuario;
+  rangos de la misma tabla, sin confirmar. También está el BRTIRUS1820A
   (cilindros, del plano). Pestaña "Simulación 3D" con layout de
   piezas STEP/STL/OBJ y búsqueda de choques (`sim/collision.py`, python-fcl:
   piezas como sólidos, piso, el propio brazo, herramienta montada en la
