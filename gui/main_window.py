@@ -336,7 +336,7 @@ class MainWindow(QMainWindow):
 
         m_sim = bar.addMenu("&Simulación")
         act = m_sim.addAction("Simular")
-        act.setShortcut("F6")
+        act.setShortcut("F9")  # F6 es "encuadrar" en la vista 3D, como en Inventor
         act.triggered.connect(lambda: (self.tabs.setCurrentWidget(self.sim_tab), self.sim_view.simulate()))
         act = m_sim.addAction("Gráficas de movimiento…")
         act.setShortcut("Ctrl+G")

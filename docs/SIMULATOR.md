@@ -20,6 +20,19 @@ En la app: pestaña **Simulación 3D** → elegir el robot, escribir las
 entradas activas (`X012=1`) y **Simular**. El robot se anima con ▶ o con la
 barra de tiempo; los problemas van a la ventana de mensajes.
 
+## Navegación 3D (como Inventor / AutoCAD)
+
+| Acción | Mouse / teclado |
+|---|---|
+| Zoom hacia el cursor | rueda |
+| Desplazar | botón del medio (o derecho), flechas |
+| Orbitar alrededor del centro de la vista | Shift + botón del medio (o izquierdo) |
+| Encuadrar todo | doble clic con el botón del medio, F6, botón *Encuadrar* |
+| Vistas estándar (encuadradas) | botones Iso, Arriba, Frente, Lado, Atrás, Izquierda |
+
+La órbita mantiene Z para arriba (como el 3DORBIT de AutoCAD). *Simular*
+pasó a F9 (F6 es encuadrar, como en Inventor). Código: `gui/camera_nav.py`.
+
 ## Layout de la celda
 
 **Importar objeto…** acepta **STEP**, STL y OBJ (mm). La pieza se apoya en el

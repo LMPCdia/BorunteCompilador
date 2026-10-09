@@ -366,9 +366,13 @@ class SimView(QWidget):
         center_layout.setContentsMargins(0, 0, 0, 0)
         if self.viewport is not None:
             cams = QHBoxLayout()
-            mouse = "Mouse: botón izquierdo gira, derecho desplaza, rueda acerca."
+            mouse = ("Como Inventor/AutoCAD: rueda = zoom hacia el cursor; botón del medio "
+                     "(o derecho) = desplazar; Shift + medio (o izquierdo) = orbitar; doble clic "
+                     "con el medio o F6 = encuadrar; flechas = desplazar.")
+            self.viewport.on_fit = lambda: self.set_camera("fit")
             for label, view in (("Encuadrar", "fit"), ("Iso", "iso"), ("Arriba", "arriba"),
-                                ("Frente", "frente"), ("Lado", "lado")):
+                                ("Frente", "frente"), ("Lado", "lado"), ("Atrás", "atras"),
+                                ("Izquierda", "izquierda")):
                 btn = QPushButton(label)
                 btn.setToolTip(mouse)
                 btn.clicked.connect(lambda _=False, v=view: self.set_camera(v))
@@ -1011,22 +1015,47 @@ class SimView(QWidget):
         if self.viewport is None:
             return
         if view != "fit":
+            # Vista estándar y encuadrada (como las caras del ViewCube de Inventor).
             self.viewport.set_view(view)
-            return
         pts = []
         if self.result is not None and self.model is not None:
             for seg in self.result.segments:
                 for q in seg.samples[:: max(1, len(seg.samples) // 4)]:
                     m = self.model.fk(q)
                     pts.append((m[0][3], m[1][3], m[2][3]))
-        for obj in self.layout_data.objects:
-            pts.append((obj.x, obj.y, obj.z))
-        pts += [(0, 0, 0), (0, 0, self.model.d1 + self.model.a2 if self.model else 1200)]
+        pts += self.scene_points()
         lo = [min(p[i] for p in pts) for i in range(3)]
         hi = [max(p[i] for p in pts) for i in range(3)]
-        center = tuple((a + b) / 2 for a, b in zip(lo, hi))
-        size = max(b - a for a, b in zip(lo, hi))
-        self.viewport.set_view("iso", center, size)
+        self.viewport.fit(lo, hi)  # sin cambiar desde dónde se mira
+
+    def scene_points(self) -> list[tuple[float, float, float]]:
+        """Puntos que tienen que entrar en la vista: el robot en su pose actual
+        (con todo su alcance alrededor de la base) y las esquinas de cada pieza."""
+        pts = []
+        if self.model is not None:
+            r = self.model.reach_mm or (self.model.a1 + self.model.a2 + self.model.d4)
+            top = self.model.d1 + self.model.a2 + self.model.a3
+            pts += [(-r * 0.3, -r * 0.3, 0.0), (r * 0.3, r * 0.3, top)]
+            frames = self.model.joint_frames(self.current_q)
+            # Cada eje (punto de la posición cero) movido con su eslabón, y la brida.
+            for (_axis, point), m in zip(self.model._screws(), frames):
+                pts.append(tuple(sum(m[i][k] * point[k] for k in range(3)) + m[i][3]
+                                 for i in range(3)))
+            flange = self.model.fk(self.current_q)
+            pts.append((flange[0][3], flange[1][3], flange[2][3]))
+        for obj in self.layout_data.objects:
+            try:
+                (x0, y0, z0), (x1, y1, z1) = self._mesh_for(obj.path).bounds()
+            except MeshError:
+                pts.append((obj.x, obj.y, obj.z))
+                continue
+            m = object_matrix(obj)
+            for x in (x0, x1):
+                for y in (y0, y1):
+                    for z in (z0, z1):
+                        pts.append(tuple(m[i][0] * x + m[i][1] * y + m[i][2] * z + m[i][3]
+                                         for i in range(3)))
+        return pts or [(0.0, 0.0, 0.0), (1000.0, 1000.0, 1000.0)]
 
     def _on_slider(self, value: int) -> None:
         if self.timeline is not None:

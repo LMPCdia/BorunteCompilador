@@ -17,14 +17,17 @@ Ejes: Z hacia arriba, mm, origen en la base del robot.
 from __future__ import annotations
 
 import struct
+from typing import Callable
 
 from PySide6.QtCore import QByteArray
 from PySide6.QtGui import QColor, QMatrix4x4, QOffscreenSurface, QOpenGLContext, QVector3D
 from PySide6.QtWidgets import QWidget
 
+from gui.camera_nav import CameraNav, NavigationFilter
 from sim.kinematics import Matrix
 from sim.meshes import Mesh, box
 
+FOV_DEG = 40.0
 AXIS_COLORS = ((1.0, 0.25, 0.25), (0.3, 0.9, 0.3), (0.35, 0.55, 1.0))  # X, Y, Z
 
 
@@ -81,13 +84,14 @@ class Viewport3D:
         self._axes: _Node | None = None
 
         self.camera = self.window.camera()
-        self.camera.lens().setPerspectiveProjection(40.0, 16 / 9, 10.0, 200000.0)
+        self.camera.lens().setPerspectiveProjection(FOV_DEG, 16 / 9, 10.0, 200000.0)
         self.camera.setUpVector(QVector3D(0, 0, 1))
-        controller = Qt3DExtras.QOrbitCameraController(self.root)
-        controller.setCamera(self.camera)
-        controller.setLinearSpeed(3000)
-        controller.setLookSpeed(180)
-        self._static.append(controller)
+        # Navegación como en Inventor/AutoCAD (gui/camera_nav.py), en vez del
+        # control de órbita de Qt3D.
+        self.nav = CameraNav((3000.0, -2800.0, 2800.0), (600.0, 0.0, 600.0), FOV_DEG)
+        self.on_fit: Callable[[], None] = lambda: self.set_view("iso")
+        self._nav_filter = NavigationFilter(self.nav, self._apply_camera, lambda: self.on_fit())
+        self.window.installEventFilter(self._nav_filter)
         self.set_view("iso")
 
         # Luces direccionales (como el sol): iluminan parejo. Una luz puntual
@@ -111,16 +115,31 @@ class Viewport3D:
         cx, cy, cz = center
         d = max(size, 500.0) * 1.6
         if name == "arriba":
-            eye, up = (cx, cy - 1, cz + d), (0, 1, 0)
+            eye = (cx, cy - 1, cz + d)
         elif name == "frente":
-            eye, up = (cx + d, cy, cz), (0, 0, 1)
+            eye = (cx + d, cy, cz)
         elif name == "lado":
-            eye, up = (cx, cy - d, cz), (0, 0, 1)
+            eye = (cx, cy - d, cz)
+        elif name == "atras":
+            eye = (cx - d, cy, cz)
+        elif name == "izquierda":
+            eye = (cx, cy + d, cz)
         else:
-            eye, up = (cx + d * 0.75, cy - d * 0.7, cz + d * 0.55), (0, 0, 1)
-        self.camera.setUpVector(QVector3D(*up))
-        self.camera.setPosition(QVector3D(*eye))
-        self.camera.setViewCenter(QVector3D(cx, cy, cz))
+            eye = (cx + d * 0.75, cy - d * 0.7, cz + d * 0.55)
+        self.nav.eye, self.nav.center = eye, (cx, cy, cz)
+        self._apply_camera()
+
+    def fit(self, lo, hi) -> None:
+        """Encuadrar la caja sin cambiar desde dónde se mira (como Inventor)."""
+        self.nav.fit(lo, hi)
+        self._apply_camera()
+
+    def _apply_camera(self) -> None:
+        nav = self.nav
+        self.camera.lens().setPerspectiveProjection(FOV_DEG, nav.width / nav.height, 10.0, 200000.0)
+        self.camera.setPosition(QVector3D(*nav.eye))
+        self.camera.setViewCenter(QVector3D(*nav.center))
+        self.camera.setUpVector(QVector3D(*nav.up))
 
     # -- construcción ---------------------------------------------------------------
 
