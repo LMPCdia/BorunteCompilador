@@ -11,6 +11,7 @@ para piezas mecánicas. Unidades: mm.
 from __future__ import annotations
 
 import math
+import re
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,6 +21,7 @@ Vec = tuple[float, float, float]
 # Una pieza de CAD convertida sin límite puede tener millones de triángulos;
 # el visor no los necesita para ver un layout.
 STEP_ELEMENTS_PER_CIRCLE = 16
+MAX_SKIPPED_FACES = 50  # caras que gmsh no puede mallar y se dejan afuera
 
 
 class MeshError(Exception):
@@ -42,6 +44,7 @@ def _normalize(v: Vec) -> Vec:
 @dataclass
 class Mesh:
     triangles: list[tuple[Vec, Vec, Vec]] = field(default_factory=list)
+    skipped_faces: int = 0  # caras del STEP que gmsh no pudo mallar (ver load_step)
 
     def add(self, a: Vec, b: Vec, c: Vec) -> None:
         self.triangles.append((a, b, c))
@@ -133,8 +136,11 @@ def load_obj(path: Path) -> Mesh:
     return mesh
 
 
-def load_step(path: Path) -> Mesh:
-    """STEP -> triángulos con gmsh. Unidades del archivo convertidas a mm."""
+def load_step(path: Path, elements_per_circle: int = STEP_ELEMENTS_PER_CIRCLE,
+              min_size_ratio: float = 2000.0) -> Mesh:
+    """STEP -> triángulos con gmsh. Unidades del archivo convertidas a mm.
+    `elements_per_circle` y `min_size_ratio` (detalle más chico = diagonal /
+    esto) bajan la cantidad de triángulos de piezas con mucho detalle."""
     try:
         import gmsh
     except Exception as e:  # noqa: BLE001 — falta la librería o su DLL
@@ -152,10 +158,10 @@ def load_step(path: Path) -> Mesh:
         xmin, ymin, zmin, xmax, ymax, zmax = gmsh.model.getBoundingBox(-1, -1)
         diag = math.dist((xmin, ymin, zmin), (xmax, ymax, zmax)) or 1.0
         # Malla de superficie gruesa, que sigue la curvatura: suficiente para ver.
-        gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", STEP_ELEMENTS_PER_CIRCLE)
+        gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", elements_per_circle)
         gmsh.option.setNumber("Mesh.MeshSizeMax", diag / 15)
-        gmsh.option.setNumber("Mesh.MeshSizeMin", diag / 2000)
-        gmsh.model.mesh.generate(2)
+        gmsh.option.setNumber("Mesh.MeshSizeMin", diag / min_size_ratio)
+        skipped = _generate_skipping_bad_faces(gmsh)
 
         tags, coords, _ = gmsh.model.mesh.getNodes()
         index = {int(t): i for i, t in enumerate(tags)}
@@ -170,9 +176,58 @@ def load_step(path: Path) -> Mesh:
                     i = index[int(n)] * 3
                     pts.append((coords[i], coords[i + 1], coords[i + 2]))
                 mesh.add(*pts)
+        mesh.skipped_faces = skipped
         return mesh
     finally:
         gmsh.finalize()
+
+
+def _generate_skipping_bad_faces(gmsh) -> int:
+    """Malla de superficie. Si gmsh no puede con una cara (p. ej. "Impossible to
+    mesh periodic surface 602", que pasa con CAD de fabricantes), la saca y
+    sigue: para ver la pieza y buscar choques, una cara de menos es mucho
+    mejor que no poder abrir el archivo. Devuelve cuántas caras se sacaron."""
+    skipped = 0
+    for _ in range(MAX_SKIPPED_FACES + 1):
+        try:
+            gmsh.model.mesh.generate(2)
+            return skipped
+        except Exception as e:  # noqa: BLE001 — gmsh tira Exception pelada
+            m = re.search(r"surface (\d+)", str(e))
+            if m is None or skipped >= MAX_SKIPPED_FACES:
+                raise MeshError(f"gmsh no pudo mallar la pieza: {e}") from e
+            # Sin borrar lo ya mallado: gmsh sigue con las caras pendientes.
+            gmsh.model.removeEntities([(2, int(m.group(1)))])
+            skipped += 1
+    return skipped
+
+
+def simplify(mesh: Mesh, cell_mm: float) -> Mesh:
+    """Menos triángulos agrupando los vértices en una grilla de `cell_mm`
+    (cada grupo pasa a su promedio; los triángulos que se achican a una línea
+    o un punto se van). El error queda por debajo de la grilla: para ver un
+    robot y buscar choques con margen, unos mm no cambian nada."""
+    def key(p: Vec) -> tuple[int, int, int]:
+        return (round(p[0] / cell_mm), round(p[1] / cell_mm), round(p[2] / cell_mm))
+
+    sums: dict[tuple[int, int, int], list[float]] = {}
+    for tri in mesh.triangles:
+        for p in tri:
+            s = sums.setdefault(key(p), [0.0, 0.0, 0.0, 0.0])
+            s[0] += p[0]
+            s[1] += p[1]
+            s[2] += p[2]
+            s[3] += 1
+    rep = {k: (s[0] / s[3], s[1] / s[3], s[2] / s[3]) for k, s in sums.items()}
+    out, seen = Mesh(skipped_faces=mesh.skipped_faces), set()
+    for tri in mesh.triangles:
+        keys = [key(p) for p in tri]
+        face = tuple(sorted(keys))
+        if len(set(keys)) < 3 or face in seen:
+            continue
+        seen.add(face)
+        out.add(*(rep[k] for k in keys))
+    return out
 
 
 def write_stl(mesh: Mesh, path: str | Path) -> None:

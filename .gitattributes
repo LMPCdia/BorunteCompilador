@@ -3,3 +3,4 @@
 # convierte a "\r\n" al hacer checkout y el .exe generaría respaldos distintos
 # de los que escribe el pad.
 pad/template.fnc -text
+*.stl binary

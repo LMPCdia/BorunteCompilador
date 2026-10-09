@@ -99,7 +99,7 @@ class Layout:
     falta para buscar choques: la herramienta física montada en la brida (su
     modelo 3D en coordenadas de la brida, y cómo está montada) y el margen."""
 
-    model: str = "BRTIRUS1820A"
+    model: str = "BRTIRUS1510A"
     objects: list[LayoutObject] = field(default_factory=list)
     tools: dict[int, list[float]] = field(default_factory=dict)
     frames: dict[int, list[float]] = field(default_factory=dict)

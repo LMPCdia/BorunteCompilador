@@ -163,7 +163,7 @@ def test_simulate_from_the_editor_source(app):
     result = view.simulate()
     assert result is not None and not result.ok
     assert any(s == "error" and "J2=80.0°" in m for s, m in reports)
-    assert "BRTIRUS1820A" in view.summary.text()
+    assert "BRTIRUS1510A" in view.summary.text()  # por defecto, el robot de la celda
     view.set_time(view.timeline.duration)
     assert view.current_q[1] == pytest.approx(80)
     assert view.slider.value() == 1000
@@ -318,10 +318,10 @@ def test_broken_model_files_do_not_break_the_tab(app, tmp_path, monkeypatch):
     monkeypatch.setattr(kin, "USER_MODELS_DIR", tmp_path)
     reports = []
     view = _view(app, "", reports)
-    assert view.model is not None and view.model.name == "BRTIRUS1820A"
+    assert view.model is not None and view.model.name == "BRTIRUS1510A"
     assert any(s == "warning" and "A_ROTO.json" in m for s, m in reports)
     assert not view.set_model("A_ROTO")
-    assert view.model.name == "BRTIRUS1820A"
+    assert view.model.name == "BRTIRUS1510A"
 
 
 def test_play_without_a_simulation_does_nothing(app):
@@ -456,6 +456,7 @@ def _table_view(app, tmp_path, reports, top=730.0):
     piece = tmp_path / "mesa.stl"
     write_stl(box((0, 0, top / 2), (600, 400, top)), piece)
     view = _view(app, WELD_SOURCE, reports)
+    view.model_combo.setCurrentText("BRTIRUS1820A")  # las medidas de la mesa son para este
     obj = view.import_object(piece)
     obj.x, obj.y, obj.z = 1100.0, -150.0, 0.0
     view._refresh_objects(rebuild=False)

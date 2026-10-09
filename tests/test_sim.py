@@ -320,7 +320,7 @@ def test_check_cli(tmp_path, capsys):
     src.write_text("MOVEJ JOINT(0, 80, 0, 0, 0, 0) SPEED 10\n", encoding="utf-8")
     assert check_main([str(src)]) == 1
     out = capsys.readouterr().out
-    assert "BRTIRUS1820A" in out and "fuera de rango" in out
+    assert "BRTIRUS1510A" in out and "fuera de rango" in out   # el robot de la celda
 
 
 # --- segunda ronda de revisión ----------------------------------------------------

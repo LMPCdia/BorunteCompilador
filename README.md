@@ -26,7 +26,9 @@ Leer primero `docs/ARCHITECTURE.md` y `docs/PAD_FORMAT.md`.
       inalcanzables y singularidades, estima el tiempo de ciclo, y arma el
       layout importando STEP/STL/OBJ. Busca **choques** del brazo y la
       herramienta contra las piezas (sólidos), el piso y el propio brazo
-      (python-fcl). Modelo cargado: BRTIRUS1820A. Ver `docs/SIMULATOR.md`
+      (python-fcl). Robots: **BRTIRUS1510A** (el de la celda, con la forma
+      real sacada del STEP del fabricante) y BRTIRUS1820A. Ver
+      `docs/SIMULATOR.md`
 - [x] Ejecutable de Windows de un solo archivo, construido en GitHub Actions
 - [ ] **Probar en el pad** un respaldo generado (nadie lo hizo todavía)
 - [ ] Espera de entrada, `ELSE` y variables en el pad (falta un ejemplo del

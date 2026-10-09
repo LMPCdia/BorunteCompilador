@@ -164,6 +164,13 @@ def _self_test() -> int:
         )
         assert result.ok and result.total_time_s > 0, "la simulación no corrió"
 
+        # El robot de la celda, con las mallas del fabricante (sim/models/*/ *.stl).
+        from sim.scene import has_real_meshes, robot_link_meshes
+
+        celda = RobotModel.load("BRTIRUS1510A")
+        assert has_real_meshes(celda), "faltan las mallas del BRTIRUS1510A"
+        assert all(len(m) for m in robot_link_meshes(celda)), "malla vacía en el 1510A"
+
         with tempfile.TemporaryDirectory() as tmp:
             step = Path(tmp) / "caja.step"
             gmsh.initialize(interruptible=False)
@@ -176,7 +183,7 @@ def _self_test() -> int:
                 gmsh.finalize()
             assert len(load_step(step)) > 0, "el STEP no tiene triángulos"
 
-    paso("simular en BRTIRUS1820A e importar un STEP (gmsh)", simular_y_leer_step)
+    paso("simular, cargar el BRTIRUS1510A e importar un STEP (gmsh)", simular_y_leer_step)
 
     def buscar_choques():
         # python-fcl es una extensión compilada con sus propias DLL: si el spec

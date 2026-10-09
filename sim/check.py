@@ -25,6 +25,8 @@ from sim.meshes import MeshError, load_mesh
 from sim.pad_sim import SimResult, simulate
 from sim.scene import Layout, has_real_meshes, robot_link_meshes
 
+DEFAULT_MODEL = "BRTIRUS1510A"  # el robot de la celda
+
 
 def format_result(result: SimResult) -> list[str]:
     lines = [f"Modelo: {result.model}"]
@@ -73,7 +75,8 @@ def check_collisions(result: SimResult, model: RobotModel, layout: Layout) -> li
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m sim.check", description=__doc__.split("\n")[1])
     parser.add_argument("archivo", help=".krlb o HCBackupRobot_*.zip")
-    parser.add_argument("--model", default="BRTIRUS1820A", choices=RobotModel.available())
+    parser.add_argument("--model", choices=RobotModel.available(),
+                        help="por defecto, el de la celda (--layout) o el BRTIRUS1510A")
     parser.add_argument("--input", action="append", default=[], metavar="X012=1",
                         help="estado de una entrada (se puede repetir)")
     parser.add_argument("--layout", metavar="CELDA.layout.json",
@@ -109,7 +112,11 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError, TypeError) as e:
             print(f"Error: no se pudo leer la celda {args.layout}: {e}", file=sys.stderr)
             return 2
-    model = RobotModel.load(args.model)
+    name = args.model or (layout.model if layout is not None else DEFAULT_MODEL)
+    if name not in RobotModel.available():
+        print(f"Error: el robot {name} no está instalado", file=sys.stderr)
+        return 2
+    model = RobotModel.load(name)
     if layout is None:
         result = simulate(backup, model, inputs)
     else:

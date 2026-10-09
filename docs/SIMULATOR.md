@@ -82,18 +82,61 @@ choque de prueba.
 
 ## Modelos 3D del robot
 
-Mientras no estén los modelos del fabricante, el robot se dibuja con
-cilindros a partir de las cotas. Para usar los modelos reales: exportar del
-CAD **un archivo por eslabón** (base, J1…J6) **en la posición cero**, en mm
-y en el sistema de la base, guardarlos en `sim/models/<MODELO>/` y listarlos
-en el JSON del modelo:
+| Modelo | Forma | Cotas | Rangos y velocidades |
+|---|---|---|---|
+| **BRTIRUS1510A** (el de la celda, por defecto) | mallas del fabricante | medidas del STEP del fabricante: alcance 1511 mm | tabla "Basic Parameters" (sin modelo indicado: **confirmar**) |
+| BRTIRUS1820A | cilindros aproximados | plano "BASIC SIZE" | la misma tabla |
+
+### Importar un robot desde el STEP del fabricante
+
+```bash
+python -m sim.robot_import "BRTIRUS1510A 六轴机器人模型（21版本）.STEP" \
+    --name BRTIRUS1510A --joints-from BRTIRUS1820A --out sim/models
+```
+
+(sin `--out` va a `~/BorunteDSL/modelos`, que la app también lee). Tarda un
+par de minutos. Qué hace:
+
+1. **Separa el ensamble en partes** (`sim/step_assembly.py`): lee el grafo del
+   STEP, escribe un STEP chico por parte y la ubica con la transformación del
+   ensamble. Hace falta porque gmsh junta todo el ensamble y los nombres de
+   Borunte vienen en GBK, que OpenCascade descarta. Las caras que gmsh no
+   puede mallar (pasa con superficies periódicas del CAD) se dejan afuera y se
+   avisa; en el 1510A fueron 2 de ~8000.
+2. **Lleva cada eslabón a la posición cero** (`sim/robot_import.py`). El
+   ensamble viene en cualquier pose (el del 1510A: J1 -1.25°, J2 3.5°, J3
+   -3.5°, J4 72°). Cada eje se ubica con los cilindros de los rodamientos y se
+   "desgira" de J1 a J6: es la inversa exacta del producto de exponenciales.
+3. **Mide las cotas** (d1, a1, a2, a3, d4, d6) de la posición cero. Control:
+   el alcance (a1 + a2 + √(d4² + a3²)) da 1511 mm para el 1510A.
+4. **Simplifica las mallas** (grilla de 6 mm, 2-3 mm en muñeca y brida):
+   ~90 mil triángulos, 4.7 MB.
+
+Las partes siguen la nomenclatura de Borunte: `PBR6US..A000` base, `B000`
+J1 (转座), `C000` brazo (大臂), `D000` J3 (三轴), `E000` J4 (四轴), `F000`
+muñeca y la brida sin código (六轴装配体). Dónde está cada eje dentro de cada
+parte (`BORUNTE_RECIPE`) se midió en el 1510A: **para otro modelo hay que
+verificarlo** (si el alcance medido no da el del nombre, la receta no sirve).
+
+Lo que el STEP no dice y queda como hipótesis:
+
+- **Rangos, velocidades y sentidos de giro**: se copian de otro modelo
+  (`--joints-from`). Reemplazarlos por la tabla del robot.
+- **El cero de J6**: la brida es casi simétrica. Se toma el giro que deja la
+  pieza alineada.
+- **El 1510A tenía el antebrazo corrido 8.6 mm** a lo largo del eje de J3. Se
+  centró, porque centrado el antebrazo queda simétrico, así que era la unión
+  del CAD y no el robot.
+
+Para dibujar un robot con otras mallas a mano: exportar del CAD **un archivo
+por eslabón** (base, J1…J6) **en la posición cero**, en mm y en el sistema de
+la base, guardarlos en `sim/models/<MODELO>/` y listarlos en el JSON:
 
 ```json
 "meshes": ["base.stl", "j1.stl", "j2.stl", "j3.stl", "j4.stl", "j5.stl", "j6.stl"]
 ```
 
-Con producto de exponenciales cada eslabón dibujado en la posición cero se
-ubica solo; no hace falta ningún ajuste extra.
+Con mallas reales, los choques ya no se marcan como "aproximados".
 
 ## Piezas
 
@@ -106,6 +149,7 @@ ubica solo; no hace falta ningún ajuste extra.
 | `sim/meshes.py` | Carga de STEP (gmsh), STL y OBJ; primitivas |
 | `sim/scene.py` | Eslabones del robot, layout (JSON) y línea de tiempo |
 | `sim/collision.py` | Choques con python-fcl sobre la trayectoria simulada |
+| `sim/step_assembly.py`, `sim/robot_import.py` | Ensamble STEP del fabricante -> modelo de robot |
 | `gui/sim_view.py`, `gui/viewport3d.py` | Pestaña "Simulación 3D" y vista Qt3D |
 
 ## Modelo geométrico

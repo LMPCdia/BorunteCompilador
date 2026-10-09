@@ -292,7 +292,8 @@ def test_check_cli_with_a_cell_reports_collisions(tmp_path, capsys):
     mesa = tmp_path / "mesa.stl"
     write_stl(box((0, 0, 365), (600, 400, 730)), mesa)
     cell = tmp_path / "celda.layout.json"
-    Layout(objects=[LayoutObject("mesa", str(mesa), x=1100, y=-150)]).save(cell)
+    Layout(model="BRTIRUS1820A",
+           objects=[LayoutObject("mesa", str(mesa), x=1100, y=-150)]).save(cell)
     assert check_main([str(src), "--layout", str(cell)]) == 1
     assert "Choque: brida (J6) contra «mesa»" in capsys.readouterr().out
 

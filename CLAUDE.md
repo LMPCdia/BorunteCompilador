@@ -60,9 +60,11 @@ respaldo real; la lógica se prueba contra `comms/robot_simulator.py`.
   solo para simular la lógica en la PC.
 - **`comms/robot_client.py`**: Modbus del robot, para digitalizar puntos y
   simular contra el robot real.
-- **`sim/`**: simulador cinemático del respaldo del pad (modelo
-  BRTIRUS1820A del plano del fabricante; el 1510A, que es el robot de la
-  celda, está pendiente de su plano). Pestaña "Simulación 3D" con layout de
+- **`sim/`**: simulador cinemático del respaldo del pad. Robot por defecto:
+  **BRTIRUS1510A** (el de la celda), con cotas y mallas sacadas del STEP del
+  fabricante (`python -m sim.robot_import`). Sus rangos y velocidades son de
+  una tabla sin modelo indicado: confirmar. También está el BRTIRUS1820A
+  (cilindros, del plano). Pestaña "Simulación 3D" con layout de
   piezas STEP/STL/OBJ y búsqueda de choques (`sim/collision.py`, python-fcl:
   piezas como sólidos, piso, el propio brazo, herramienta montada en la
   brida). Ver `docs/SIMULATOR.md`.
