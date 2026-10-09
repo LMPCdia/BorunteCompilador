@@ -111,6 +111,15 @@ Cada robot de la biblioteca es una carpeta `Robots/<MODELO>/` con:
 
 `python -m sim.library` avisa si a un robot le falta el PDF o la planilla.
 
+**Rutina automática** (Claude, *Planillas de robots desde datasheets*: lunes
+a viernes, cada hora de 7:53 a 18:53, hora de Argentina): corre
+`python -m sim.library --pendientes` y, por cada carpeta de robot con un PDF
+sin planilla (o con planilla no revisada contra ese PDF), lee el datasheet,
+crea o completa «Parámetros <MODELO>» con la página de cada dato, deja todo
+"Confirmado: no" y avisa. Si no hay PDFs nuevos, termina sin avisar. Necesita
+los conectores de Google Drive y Google Sheets en la rutina (se agregan desde
+la pantalla de rutinas de claude.ai).
+
 **Usar este robot** (pestaña Biblioteca) hace todo solo:
 
 1. lee la planilla (siempre, de la web: si alguien la corrigió, se usa lo nuevo);
