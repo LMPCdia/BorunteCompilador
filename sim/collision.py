@@ -232,17 +232,21 @@ class CollisionChecker:
     def __init__(self, model: RobotModel, link_meshes: list[Mesh], obstacles: list[Obstacle],
                  tool_mesh: Mesh | None = None, tool_mount: list[float] | None = None,
                  margin_mm: float = 20.0, floor: bool = True, self_collision: bool = True,
-                 approximate_robot: bool = True) -> None:
+                 approximate_robot: bool = True, base: Matrix | None = None) -> None:
         """`link_meshes`: base + J1..J6 en la posición cero (como los dibuja el
         visor, sin el eje de dibujo de la brida). `tool_mesh`: la herramienta
         física en coordenadas de la brida, montada con `tool_mount` (X, Y, Z,
-        U, V, W respecto de la brida)."""
+        U, V, W respecto de la brida). `base`: dónde está parado el robot en la
+        celda (`Layout.base_matrix()`); las piezas y el piso están en
+        coordenadas de la celda."""
         if fcl is None:
             raise CollisionUnavailable("Falta python-fcl: no se pueden revisar choques")
         if len(link_meshes) != 7:
             raise ValueError("hacen falta 7 mallas: base y J1..J6")
         self.model = model
         self.margin = max(0.0, float(margin_mm))
+        self.base = base if base is not None else [[float(i == j) for j in range(4)]
+                                                    for i in range(4)]
         self.floor = floor
         self.approximate_robot = approximate_robot
         self.parts = [_Part(PART_NAMES[i], None if i == 0 else i - 1, m, i)
@@ -289,11 +293,12 @@ class CollisionChecker:
     # -- medir ------------------------------------------------------------------------------
 
     def _pose(self, q: list[float]):
+        """Por parte: (matriz a la celda, centro en la celda)."""
         frames = self.model.joint_frames(q)
         placed = {}
         for part in self.parts:
-            m = None if part.frame is None else frames[part.frame]
-            placed[id(part)] = (m, part.center if m is None else _apply(m, part.center))
+            m = self.base if part.frame is None else mat_mul(self.base, frames[part.frame])
+            placed[id(part)] = (m, _apply(m, part.center))
         return placed
 
     def _set(self, part: _Part, placed, done: set) -> None:

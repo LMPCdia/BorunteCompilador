@@ -68,10 +68,15 @@ respaldo real; la lógica se prueba contra `comms/robot_simulator.py`.
   piezas STEP/STL/OBJ y búsqueda de choques (`sim/collision.py`, python-fcl:
   piezas como sólidos, piso, el propio brazo, herramienta montada en la
   brida), gráficas de movimiento (perfil de aceleración supuesto), navegación
-  tipo Inventor, ubicación de piezas por distancias y biblioteca en línea de
+  tipo Inventor, ubicación de piezas por distancias, el robot corrido y
+  girado en la celda (`Layout.robot_base`) y biblioteca en línea de
   Google Drive (`sim/library.py`): cada robot = STEP + planilla de parámetros
   (`sim/robot_params.py`), que se baja, se compara con el CAD y se verifica
-  con la cinemática inversa. Ver `docs/SIMULATOR.md`.
+  con la cinemática inversa; sus robots salen en la lista Robot. El
+  importador encuentra los ejes en los cilindros del STEP (`find_axes`,
+  validado con el plano del 0805A). **Pendiente**: el 1510A de la app tiene
+  J2 36 mm más abajo que lo que da ese método (ver `docs/SIMULATOR.md`).
+  Ver `docs/SIMULATOR.md`.
 - **GUI** (`gui/`): "Exportar para el pad" (Ctrl+E) + pestaña "Pad" con el
   listado; compilar/ejecutar en la VM; digitalizar puntos.
 - **`packaging/`** + `.github/workflows/build-exe.yml`: `.exe` de un solo

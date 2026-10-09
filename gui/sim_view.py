@@ -26,6 +26,7 @@ from typing import Callable
 from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtGui import QBrush, QColor, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QGroupBox,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -55,7 +56,7 @@ from compiler.pad_codegen import MAX_TOOL_OR_COORD, PadOptions, compile_to_pad_r
 from pad.backup import PadBackup
 from pad.listing import io_name
 from sim import collision
-from sim.kinematics import RobotModel, identity, pose_matrix, rot_axis
+from sim.kinematics import RobotModel, identity, mat_mul, matrix_to_pose, pose_matrix, rot_axis
 from sim.meshes import Mesh, MeshError, load_mesh
 from sim import placement
 from sim.motion import MotionCurves, analyze
@@ -117,6 +118,12 @@ def _number(text: str) -> float:
 
 def _fmt(value: float) -> str:
     return f"{(value or 0.0):g}"  # sin "-0"
+
+
+def _snap(degrees: float) -> float:
+    """Ángulo redondeado: girar de a 90° deja 90, no 89.99999999."""
+    value = round(degrees, 6)
+    return 0.0 if value == 0 else value
 
 
 def _vscroll(widget: QWidget) -> QScrollArea:
@@ -302,8 +309,11 @@ class SimView(QWidget):
 
     def _build(self) -> None:
         self.model_combo = QComboBox()
+        self.model_combo.setToolTip("Robots instalados y, debajo, los de la biblioteca de Drive "
+                                    "(se bajan, se importan y se verifican al elegirlos)")
+        self.model_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self.model_combo.addItems(RobotModel.available())
-        self.model_combo.currentTextChanged.connect(self.set_model)
+        self.model_combo.currentIndexChanged.connect(self._on_model_chosen)
         self.source_label = QLabel("Programa: el del editor")
         self.open_backup_btn = open_backup_btn = QPushButton("Abrir respaldo del pad…")
         open_backup_btn.clicked.connect(self._on_open_backup)
@@ -465,8 +475,9 @@ class SimView(QWidget):
         remove_btn.clicked.connect(self._on_remove)
         objects = QWidget()
         objects_layout = QVBoxLayout(objects)
-        objects_note = QLabel("Piezas STEP/STL/OBJ. X, Y, Z: dónde queda el origen del CAD, en mm "
-                              "respecto de la base del robot.")
+        objects_layout.addWidget(self._build_robot_base())
+        objects_note = QLabel("<b>Piezas</b> STEP/STL/OBJ. X, Y, Z: dónde queda el origen del CAD, "
+                              "en mm, en coordenadas de la celda (piso en Z = 0).")
         objects_note.setWordWrap(True)
         objects_layout.addWidget(objects_note)
         objects_layout.addWidget(self.objects_table, 1)
@@ -489,21 +500,24 @@ class SimView(QWidget):
             "y no hace falta cargarlo. Se dibujan como ejes rojo/verde/azul.",
             self._on_frames_changed)
 
-        tabs = QTabWidget()
-        tabs.addTab(issues, "Problemas")
-        tabs.addTab(_vscroll(objects), "Piezas")
-        tabs.addTab(_vscroll(self._build_collisions()), "Choques")
-        tabs.addTab(self.tools_table, "Herramientas")
         from gui.library_view import LibraryPanel
 
         self.library = LibraryPanel(on_insert=self._insert_from_library,
                                     on_tool=self._tool_from_library,
                                     on_robot=self.use_robot, report=self._report,
-                                    settings=self._settings)
+                                    settings=self._settings, on_catalog=self._on_catalog)
+        # Biblioteca y Celda primero: con el panel angosto, las últimas
+        # pestañas quedan escondidas detrás de las flechitas.
+        tabs = QTabWidget()
+        tabs.addTab(issues, "Problemas")
+        self.cell_tab = _vscroll(objects)
+        tabs.addTab(self.cell_tab, "Celda")
         self.library_tab_index = tabs.addTab(self.library, "Biblioteca")
+        tabs.addTab(_vscroll(self._build_collisions()), "Choques")
+        tabs.addTab(self.tools_table, "Herramientas")
+        tabs.addTab(self.frames_table, "Coordenadas")
         tabs.currentChanged.connect(
             lambda i: self.library.ensure_loaded() if i == self.library_tab_index else None)
-        tabs.addTab(self.frames_table, "Coordenadas")
         self.side_tabs = tabs
 
         self.open_cell_btn = open_btn = QPushButton("Abrir celda…")
@@ -519,6 +533,51 @@ class SimView(QWidget):
         row2.addWidget(save_btn)
         side_layout.addLayout(row2)
         return side
+
+    def _build_robot_base(self) -> QWidget:
+        """Dónde está parado el robot en la celda: corrido y girado."""
+        group = QGroupBox("Robot en la celda (mm, °)")
+        self.base_spins: list[QDoubleSpinBox] = []
+        g = QGridLayout(group)
+        for i, (label, lo, hi) in enumerate(
+                (("X", -20000, 20000), ("Y", -20000, 20000), ("Z", -5000, 10000),
+                 ("Rx", -180, 180), ("Ry", -180, 180), ("Rz", -180, 180))):
+            box = QDoubleSpinBox()
+            box.setRange(lo, hi)
+            box.setDecimals(1)
+            box.setMinimumWidth(50)
+            box.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons)
+            if i >= 3:
+                box.setWrapping(True)
+            box.valueChanged.connect(self._on_base_spin)
+            self.base_spins.append(box)
+            # X | Rx, Y | Ry, Z | Rz: dos columnas, entra en el panel angosto.
+            g.addWidget(QLabel(label), i % 3, (i // 3) * 2)
+            g.addWidget(box, i % 3, (i // 3) * 2 + 1)
+        for col in (1, 3):
+            g.setColumnStretch(col, 1)
+        buttons = QGridLayout()        # 2 x 2: entra en el panel angosto
+        for k, axis in enumerate("XYZ"):
+            btn = QPushButton(f"Girar 90° {axis}")
+            btn.setToolTip(f"Gira el robot 90° alrededor del eje {axis} de la celda, sobre su "
+                           f"base. Shift+clic: -90°.")
+            btn.clicked.connect(lambda _c=False, a=axis: self.rotate_robot(
+                a, -90.0 if QGuiApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier
+                else 90.0))
+            buttons.addWidget(btn, k // 2, k % 2)
+        reset = QPushButton("Al origen")
+        reset.setToolTip("Parado en el origen de la celda, sin girar")
+        reset.clicked.connect(lambda: self.set_robot_base([0.0] * 6))
+        buttons.addWidget(reset, 1, 1)
+        g.addLayout(buttons, 3, 0, 1, 4)
+        note = QLabel("Los puntos del programa son respecto de la base: se mueven con el robot. "
+                      "Las piezas y el piso, no.")
+        note.setWordWrap(True)
+        note.setToolTip("Rx, Ry, Rz: giro en X, después en Y, después en Z, sobre los ejes de la "
+                        "celda. El simulador no sabe si el fabricante permite montar el robot "
+                        "así (en pared, colgado): revisarlo en el datasheet.")
+        g.addWidget(note, 4, 0, 1, 4)
+        return group
 
     def _build_placement(self) -> QWidget:
         """Ubicar la pieza elegida por distancias (sim/placement.py) y medir."""
@@ -591,7 +650,8 @@ class SimView(QWidget):
         lay.addLayout(row)
         lay.addWidget(self.place_info)
         note = QLabel("Las distancias se miden a la caja de cada pieza (con su giro), y el apoyo "
-                      "es el centro de su base. El robot está en el origen; 0° es adelante.")
+                      "es el centro de su base. Las distancias al robot se miden desde su "
+                      "base; 0° es hacia donde mira el robot.")
         note.setWordWrap(True)
         lay.addWidget(note)
         self._on_place_mode(0)
@@ -666,9 +726,7 @@ class SimView(QWidget):
             return
         last = self._settings.value("sim/model", "")
         name = last if last in names else (DEFAULT_MODEL if DEFAULT_MODEL in names else names[0])
-        self.model_combo.blockSignals(True)
-        self.model_combo.setCurrentText(name)
-        self.model_combo.blockSignals(False)
+        self._fill_model_combo(name)
         self.set_model(name)
 
     def set_model(self, name: str) -> bool:
@@ -722,7 +780,7 @@ class SimView(QWidget):
             obj.drive_id = item.file_id
             self._refresh_objects(rebuild=False)
             self.objects_table.selectRow(len(self.layout_data.objects) - 1)
-            self.side_tabs.setCurrentIndex(1)       # a Piezas, para ubicarla
+            self.side_tabs.setCurrentWidget(self.cell_tab)   # a Celda, para ubicarla
 
     def _tool_from_library(self, path: Path, item) -> None:
         if self.set_tool_mesh(path):
@@ -750,16 +808,103 @@ class SimView(QWidget):
 
     def use_robot(self, name: str) -> bool:
         """Elegir un robot (p. ej. recién importado de la biblioteca)."""
-        names = RobotModel.available()
-        if name not in names:
+        if name not in RobotModel.available():
             self._report("error", f"El robot {name} no está instalado.")
             return False
-        self.model_combo.blockSignals(True)
-        self.model_combo.clear()
-        self.model_combo.addItems(names)
-        self.model_combo.setCurrentText(name)
-        self.model_combo.blockSignals(False)
+        self._fill_model_combo(name)
         return self.set_model(name)
+
+    def _fill_model_combo(self, current: str | None = None) -> None:
+        """Los instalados y, debajo, los de la biblioteca que todavía no se
+        bajaron (o una entrada para ir a buscarlos)."""
+        current = current or (self.model.name if self.model is not None else "")
+        names = RobotModel.available()
+        combo = self.model_combo
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(names)
+        remote = [item for item in self.library.robots() if item.model_name not in names]
+        if remote or self.library.catalog is None:
+            combo.insertSeparator(combo.count())
+        for item in remote:
+            combo.addItem(f"{item.model_name} (biblioteca)", ("biblioteca", item.file_id))
+            combo.setItemData(combo.count() - 1, "Se baja de Google Drive, se importa del STEP del "
+                              "fabricante y se verifica (unos minutos la primera vez)",
+                              Qt.ItemDataRole.ToolTipRole)
+        if self.library.catalog is None:
+            combo.addItem("Robots de la biblioteca…", ("abrir",))
+        if current in names:
+            combo.setCurrentText(current)
+        combo.blockSignals(False)
+
+    def _on_catalog(self, _catalog) -> None:
+        self._fill_model_combo()
+
+    def _on_model_chosen(self, index: int) -> None:
+        data = self.model_combo.itemData(index)
+        if data is None:
+            self.set_model(self.model_combo.itemText(index))
+            return
+        # Una entrada de la biblioteca: el robot de la vista sigue siendo el
+        # actual hasta que termine de bajarse e importarse.
+        self._fill_model_combo()
+        if data[0] == "abrir":
+            self.side_tabs.setCurrentIndex(self.library_tab_index)
+            return
+        item = next((i for i in self.library.robots() if i.file_id == data[1]), None)
+        if item is None:
+            return
+        self.side_tabs.setCurrentIndex(self.library_tab_index)   # ahí se ve el avance
+        self._report("info", f"Preparando {item.model_name} desde la biblioteca: se baja el "
+                             f"STEP y la planilla, se importa y se verifica (unos minutos la "
+                             f"primera vez).")
+        self.library.prepare_robot(item)
+
+    def showEvent(self, event) -> None:  # noqa: N802 — API de Qt
+        """La primera vez que se ve el simulador se lee la biblioteca (en un
+        hilo), para que sus robots aparezcan en la lista de Robot."""
+        super().showEvent(event)
+        self.library.ensure_loaded(quiet=True)
+
+    # -- dónde está el robot ---------------------------------------------------------------
+
+    def set_robot_base(self, pose: list[float]) -> None:
+        """X, Y, Z (mm), Rx, Ry, Rz (°) de la base del robot en la celda."""
+        pose = [round(float(v), 3) for v in pose]
+        changed = pose != list(self.layout_data.robot_base)
+        self.layout_data.robot_base = pose
+        self._show_robot_base()
+        if changed:
+            self._mark_collisions_stale("se movió el robot")
+            if self.objects_table.rowCount():
+                self._on_piece_selected()     # las distancias al robot cambiaron
+
+    def rotate_robot(self, axis: str, degrees: float) -> None:
+        """Girar el robot sobre su base alrededor de un eje FIJO de la celda."""
+        m = self.layout_data.base_matrix()
+        r = rot_axis({"X": (1, 0, 0), "Y": (0, 1, 0), "Z": (0, 0, 1)}[axis],
+                     math.radians(degrees))
+        turn = [list(row) + [0.0] for row in r] + [[0.0, 0.0, 0.0, 1.0]]
+        rotated = mat_mul(turn, m)
+        x, y, z = (m[i][3] for i in range(3))            # la base no se corre
+        _, _, _, u, v, w = matrix_to_pose(rotated)
+        self.set_robot_base([x, y, z] + [_snap(a) for a in (u, v, w)])
+
+    def _on_base_spin(self, _value: float) -> None:
+        if not getattr(self, "_showing_base", False):
+            self.set_robot_base([box.value() for box in self.base_spins])
+
+    def _show_robot_base(self) -> None:
+        self._showing_base = True
+        for box, value in zip(self.base_spins, self.layout_data.robot_base):
+            box.setValue(value)
+        self._showing_base = False
+        if self.viewport is not None:
+            self.viewport.set_robot_base(self.layout_data.base_matrix())
+
+    def _to_cell(self, point) -> tuple[float, float, float]:
+        m = self.layout_data.base_matrix()
+        return tuple(sum(m[i][k] * point[k] for k in range(3)) + m[i][3] for i in range(3))
 
     # -- qué se simula ------------------------------------------------------------------
 
@@ -937,7 +1082,8 @@ class SimView(QWidget):
                 self.model, robot_link_meshes(self.model, tool_axis=False), obstacles,
                 tool_mesh=self._tool_mesh(), tool_mount=self.layout_data.tool_mount,
                 margin_mm=self.layout_data.margin_mm,
-                approximate_robot=not has_real_meshes(self.model))
+                approximate_robot=not has_real_meshes(self.model),
+                base=self.layout_data.base_matrix())
             return checker.check(result, progress=self._progress)
         except Cancelled:
             raise
@@ -1215,7 +1361,7 @@ class SimView(QWidget):
             for seg in self.result.segments:
                 for q in seg.samples[:: max(1, len(seg.samples) // 4)]:
                     m = self.model.fk(q)
-                    pts.append((m[0][3], m[1][3], m[2][3]))
+                    pts.append(self._to_cell((m[0][3], m[1][3], m[2][3])))
         pts += self.scene_points()
         lo = [min(p[i] for p in pts) for i in range(3)]
         hi = [max(p[i] for p in pts) for i in range(3)]
@@ -1226,16 +1372,18 @@ class SimView(QWidget):
         (con todo su alcance alrededor de la base) y las esquinas de cada pieza."""
         pts = []
         if self.model is not None:
+            robot = []      # en coordenadas de la base; después, a la celda
             r = self.model.reach_mm or (self.model.a1 + self.model.a2 + self.model.d4)
             top = self.model.d1 + self.model.a2 + self.model.a3
-            pts += [(-r * 0.3, -r * 0.3, 0.0), (r * 0.3, r * 0.3, top)]
+            robot += [(-r * 0.3, -r * 0.3, 0.0), (r * 0.3, r * 0.3, top)]
             frames = self.model.joint_frames(self.current_q)
             # Cada eje (punto de la posición cero) movido con su eslabón, y la brida.
             for (_axis, point), m in zip(self.model._screws(), frames):
-                pts.append(tuple(sum(m[i][k] * point[k] for k in range(3)) + m[i][3]
-                                 for i in range(3)))
+                robot.append(tuple(sum(m[i][k] * point[k] for k in range(3)) + m[i][3]
+                                   for i in range(3)))
             flange = self.model.fk(self.current_q)
-            pts.append((flange[0][3], flange[1][3], flange[2][3]))
+            robot.append((flange[0][3], flange[1][3], flange[2][3]))
+            pts += [self._to_cell(p) for p in robot]
         for obj in self.layout_data.objects:
             try:
                 (x0, y0, z0), (x1, y1, z1) = self._mesh_for(obj.path).bounds()
@@ -1332,6 +1480,7 @@ class SimView(QWidget):
         self.layout_data.tools = self.tools_table.values()     # la tabla manda
         self.layout_data.frames = self.frames_table.values()
         self._show_collision_settings()
+        self._show_robot_base()
         if self.viewport is not None and self.model is not None:
             self.viewport.set_robot(self._robot_meshes(self.model))  # con su herramienta
             self.show_pose(self.current_q)
@@ -1461,7 +1610,8 @@ class SimView(QWidget):
         sx, sy, sz = box.size
         parts = [f"Tamaño {sx:.0f} × {sy:.0f} × {sz:.0f} mm",
                  f"apoyo en ({box.base[0]:.0f}, {box.base[1]:.0f}, {box.base[2]:.0f})",
-                 f"al eje del robot: <b>{placement.axis_distance(box):.0f} mm</b>"]
+                 f"al eje del robot: <b>"
+                 f"{placement.axis_distance(box, self.layout_data.robot_base):.0f} mm</b>"]
         for i, other in enumerate(self.layout_data.objects):
             if i == index:
                 continue
@@ -1486,13 +1636,15 @@ class SimView(QWidget):
             if mode == 0:
                 xyz = placement.from_robot(obj, mesh, self.place_distance.value(),
                                            self.place_angle.value(),
-                                           to_face=self.place_to.currentIndex() == 0)
+                                           to_face=self.place_to.currentIndex() == 0,
+                                           base=self.layout_data.robot_base)
             else:
                 ref_index = self.place_ref.currentData()
                 if ref_index is None:
                     self._report("warning", "No hay otra pieza para tomar de referencia.")
                     return False
-                ref = placement.ROBOT_BASE if ref_index == -1 else self._box(ref_index)
+                ref = (placement.robot_box(self.layout_data.robot_base) if ref_index == -1
+                       else self._box(ref_index))
                 if mode == 1:
                     xyz = placement.offset_from(obj, mesh, ref, self.place_dx.value(),
                                                 self.place_dy.value(), self.place_dz.value())
@@ -1547,12 +1699,14 @@ class SimView(QWidget):
         return text
 
     def _measure_checker(self):
-        key = (self.model.name, self.layout_data.tool_mesh, tuple(self.layout_data.tool_mount))
+        key = (self.model.name, self.layout_data.tool_mesh, tuple(self.layout_data.tool_mount),
+               tuple(self.layout_data.robot_base))
         if self._measure_key != key:
             self._measure_checker_obj = collision.CollisionChecker(
                 self.model, robot_link_meshes(self.model, tool_axis=False), [],
                 tool_mesh=self._tool_mesh(), tool_mount=self.layout_data.tool_mount,
-                margin_mm=0, floor=False, self_collision=False)
+                margin_mm=0, floor=False, self_collision=False,
+                base=self.layout_data.base_matrix())
             self._measure_key = key
         return self._measure_checker_obj
 

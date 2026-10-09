@@ -11,7 +11,10 @@ Python a sus componentes. Se guardan JUNTAS y se sueltan juntas al borrar el
 nodo; antes iban a una lista global que crecía sin límite (cada edición de la
 tabla de piezas volvía a subir la malla entera a la GPU).
 
-Ejes: Z hacia arriba, mm, origen en la base del robot.
+Ejes: Z hacia arriba, mm, coordenadas de la celda (piso en z = 0). Lo del
+robot (eslabones, trayectoria, sistemas de coordenadas del pad) cuelga de un
+nodo propio que se ubica con `set_robot_base`: adentro de ese nodo todo está
+en coordenadas de la base del robot, como lo calcula la cinemática.
 """
 
 from __future__ import annotations
@@ -78,6 +81,10 @@ class Viewport3D:
 
         self.root = Qt3DCore.QEntity()
         self._static: list = []  # cámara, luces, piso: viven lo mismo que la vista
+        self.robot_root = Qt3DCore.QEntity(self.root)
+        self._robot_transform = Qt3DCore.QTransform()
+        self.robot_root.addComponent(self._robot_transform)
+        self._static += [self.robot_root, self._robot_transform]
         self._robot_links: list[_Node] = []
         self._objects: list[_Node] = []
         self._path: _Node | None = None
@@ -144,9 +151,9 @@ class Viewport3D:
     # -- construcción ---------------------------------------------------------------
 
     def _geometry_node(self, data: bytes, count: int, second_attr: str, primitive,
-                       material) -> _Node:
+                       material, parent=None) -> _Node:
         core, render = self._core, self._render
-        entity = core.QEntity(self.root)
+        entity = core.QEntity(parent if parent is not None else self.root)
         geometry = core.QGeometry(entity)
         buffer = core.QBuffer(geometry)
         buffer.setData(QByteArray(data))
@@ -173,7 +180,7 @@ class Viewport3D:
         refs += [renderer, transform]
         return _Node(entity, transform, refs)
 
-    def _mesh_node(self, mesh: Mesh, color: str, matte: bool = False) -> _Node:
+    def _mesh_node(self, mesh: Mesh, color: str, matte: bool = False, parent=None) -> _Node:
         material = self._extras.QPhongMaterial()
         material.setDiffuse(QColor(color))
         material.setAmbient(QColor(color).darker(250))
@@ -183,11 +190,11 @@ class Viewport3D:
         material.setShininess(80)
         node = self._geometry_node(
             mesh.interleaved(), len(mesh) * 3, self._core.QAttribute.defaultNormalAttributeName(),
-            self._render.QGeometryRenderer.PrimitiveType.Triangles, material)
+            self._render.QGeometryRenderer.PrimitiveType.Triangles, material, parent)
         node.material = material
         return node
 
-    def _lines_node(self, points, colors, strip: bool) -> _Node:
+    def _lines_node(self, points, colors, strip: bool, parent=None) -> _Node:
         data = bytearray()
         for p, c in zip(points, colors):
             data += struct.pack("<6f", *p, *c)
@@ -195,7 +202,7 @@ class Viewport3D:
                      else self._render.QGeometryRenderer.PrimitiveType.Lines)
         return self._geometry_node(
             bytes(data), len(points), self._core.QAttribute.defaultColorAttributeName(),
-            primitive, self._extras.QPerVertexColorMaterial())
+            primitive, self._extras.QPerVertexColorMaterial(), parent)
 
     def _add_floor(self) -> None:
         floor = box((0, 0, -2), (8000, 8000, 4))
@@ -210,8 +217,12 @@ class Viewport3D:
         for node in self._robot_links:
             node.remove()
         colors = ["#5b6670", "#e8792b", "#e8792b", "#e8792b", "#d9dde1", "#d9dde1", "#30363d"]
-        self._robot_links = [self._mesh_node(m, colors[i % len(colors)])
+        self._robot_links = [self._mesh_node(m, colors[i % len(colors)], parent=self.robot_root)
                              for i, m in enumerate(link_meshes)]
+
+    def set_robot_base(self, matrix: Matrix) -> None:
+        """Dónde está parado el robot en la celda (`Layout.base_matrix()`)."""
+        self._robot_transform.setMatrix(_qmatrix(matrix))
 
     def set_joint_frames(self, frames: list[Matrix]) -> None:
         """`frames[i]` ubica el eslabón i+1 (la base no se mueve)."""
@@ -222,15 +233,17 @@ class Viewport3D:
 
     def set_path(self, points: list[tuple[float, float, float]],
                  colors: list[tuple[float, float, float]]) -> None:
-        """Línea por los puntos (sin iluminación: un color por vértice)."""
+        """Línea por los puntos, en coordenadas de la base del robot (sin
+        iluminación: un color por vértice)."""
         if self._path is not None:
             self._path.remove()
             self._path = None
         if len(points) >= 2:
-            self._path = self._lines_node(points, colors, strip=True)
+            self._path = self._lines_node(points, colors, strip=True, parent=self.robot_root)
 
     def set_axes(self, frames: list[Matrix], length: float = 200.0) -> None:
-        """Tríada X (rojo), Y (verde), Z (azul) en cada transformación."""
+        """Tríada X (rojo), Y (verde), Z (azul) en cada transformación
+        (respecto de la base del robot: son los sistemas del pad)."""
         if self._axes is not None:
             self._axes.remove()
             self._axes = None
@@ -242,7 +255,7 @@ class Viewport3D:
                 points += [origin, tip]
                 colors += [color, color]
         if points:
-            self._axes = self._lines_node(points, colors, strip=False)
+            self._axes = self._lines_node(points, colors, strip=False, parent=self.robot_root)
 
     # -- piezas del layout ------------------------------------------------------------
 

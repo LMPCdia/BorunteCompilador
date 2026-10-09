@@ -9,9 +9,12 @@ horizontal hacia +X, brida mirando a +X, Z para arriba, origen en el eje de
 J1 a la altura del apoyo de la base.
 
 Cómo:
-1. Se ubican los 6 ejes en el ensamble, cada uno con un cilindro de la pieza
-   que gira con él (una "receta" por familia de robots: qué parte es cada
-   eslabón y en qué cilindro de la parte está cada eje).
+1. Se ubican los 6 ejes en el ensamble (`find_axes`): cada eje es la recta
+   donde las DOS partes que une tienen cilindros (el rodamiento o el reductor
+   de una, el alojamiento en la otra), elegida entre las que cumplen la
+   dirección que le toca (J1 vertical, J2 perpendicular a J1, J3 paralelo a
+   J2...). Así sirve para cualquier modelo de la familia sin medir nada a
+   mano. Una "receta" fija (qué cilindro de qué parte) sigue disponible.
 2. Se "desgira" eje por eje, de J1 a J6: cada giro mueve todos los
    eslabones y ejes de ahí en adelante, hasta que se cumple la posición cero.
    Así es exactamente la inversa del producto de exponenciales.
@@ -36,10 +39,15 @@ from sim.step_assembly import Part, _apply
 
 Vec = list[float]
 
-# Familia BRTIRUS (Borunte): el código de cada parte termina en A000..F000 y la
-# brida no tiene código. Los ejes están en coordenadas de cada parte; salen de
-# sus cilindros más grandes (rodamientos), medidos en el 1510A. Para otro
-# modelo de la familia hay que verificarlos (ver docs/SIMULATOR.md).
+# Familia BRTIRUS (Borunte): el código de cada parte termina en A000..F000
+# (PBR6US15A000 en el 1510A, PAR6US08A000 en el 0805A) y la brida es la que
+# queda (sin código en el 1510A, F120 en el 0805A).
+BORUNTE_LINKS = {"base": "A000", "J1": "B000", "J2": "C000", "J3": "D000", "J4": "E000",
+                 "J5": "F000", "J6": None}
+
+# Receta medida a mano en el 1510A (ejes en coordenadas de cada parte). Ya no
+# se usa por defecto: `find_axes` los encuentra solo (ver docs/SIMULATOR.md,
+# que explica en qué difieren para J2).
 BORUNTE_RECIPE = {
     "links": {"base": "A000", "J1": "B000", "J2": "C000", "J3": "D000", "J4": "E000",
               "J5": "F000", "J6": None},
@@ -111,9 +119,9 @@ class ImportedRobot:
         return g["a1"] + g["a2"] + math.hypot(g["d4"], g["a3"])
 
 
-def _find(parts: list[Part], code: str | None) -> Part:
+def _find(parts: list[Part], code: str | None, codes=BORUNTE_LINKS.values()) -> Part:
     if code is None:
-        rest = [p for p in parts if not p.name.startswith("PBR")]
+        rest = [p for p in parts if not any(c and c in p.name for c in codes)]
         if len(rest) != 1:
             raise ValueError(f"no se pudo identificar la brida entre {[p.name for p in parts]}")
         return rest[0]
@@ -123,11 +131,13 @@ def _find(parts: list[Part], code: str | None) -> Part:
     return found[0]
 
 
-def import_robot(parts: list[Part], recipe: dict = BORUNTE_RECIPE,
+def import_robot(parts: list[Part], recipe: dict | None = None,
                  up_axis: str = "Y") -> ImportedRobot:
-    """`parts`: salida de `sim.step_assembly.split_assembly` (coordenadas del ensamble)."""
+    """`parts`: salida de `sim.step_assembly.split_assembly` (coordenadas del
+    ensamble). Sin `recipe`, los ejes salen de los cilindros (`find_axes`)."""
     names = ["base", "J1", "J2", "J3", "J4", "J5", "J6"]
-    by_link = {k: _find(parts, recipe["links"][k]) for k in names}
+    links = (recipe or {}).get("links", BORUNTE_LINKS)
+    by_link = {k: _find(parts, links[k], links.values()) for k in names}
     by_code = {p.name: p for p in parts}
 
     # CAD -> robot: Z para arriba (si el CAD tiene Y arriba, giro de 90° en X).
@@ -142,11 +152,16 @@ def import_robot(parts: list[Part], recipe: dict = BORUNTE_RECIPE,
     # final se aplica una vez a cada malla.
     moves = {k: to_robot for k in names}
     axes = []
-    for j in ["J1", "J2", "J3", "J4", "J5", "J6"]:
-        code, d, p = recipe["axes"][j]
-        part = next(pp for name, pp in by_code.items() if code in name)
-        axes.append((_unit(_dir(to_robot, _dir(part.matrix, d))),
-                     list(_apply(to_robot, _apply(part.matrix, p)))))
+    if recipe is not None and "axes" in recipe:
+        for j in ["J1", "J2", "J3", "J4", "J5", "J6"]:
+            code, d, p = recipe["axes"][j]
+            part = next(pp for name, pp in by_code.items() if code in name)
+            axes.append((_unit(_dir(to_robot, _dir(part.matrix, d))),
+                         list(_apply(to_robot, _apply(part.matrix, p)))))
+    else:
+        up = [0.0, 1.0, 0.0] if up_axis == "Y" else [0.0, 0.0, 1.0]
+        for d, p in find_axes([by_link[k] for k in names], up):
+            axes.append((_unit(_dir(to_robot, d)), list(_apply(to_robot, p))))
 
     # Apoyo de la base = z mínima de la base: el origen va ahí, sobre el eje J1.
     zmin = min(_apply(to_robot, v)[2] for tri in by_link["base"].mesh.triangles for v in tri)
@@ -185,6 +200,13 @@ def import_robot(parts: list[Part], recipe: dict = BORUNTE_RECIPE,
         if i < 5:
             v, t = target(i)
             angle = _angle_to(v, t, axis_dir)
+            if i == 0:
+                # "J2 a lo largo de Y" se cumple mirando a +X o a -X: el robot
+                # mira hacia donde va el antebrazo (de J3 a la muñeca).
+                turn = _rotation(axis_dir, axis_point, angle)
+                forearm = _sub(_apply(turn, axes[4][1]), _apply(turn, axes[2][1]))
+                if forearm[0] < 0:
+                    angle += math.pi
         else:
             angle = _flange_zero(moves["J6"], by_link["J6"].matrix, axis_dir)
         undo = _rotation(axis_dir, axis_point, angle)
@@ -226,6 +248,87 @@ def import_robot(parts: list[Part], recipe: dict = BORUNTE_RECIPE,
     }
     geometry = {k: round(float(v), 1) for k, v in geometry.items()}
     return ImportedRobot(links, geometry, [round(float(a), 2) for a in cad_pose], notes)
+
+
+# --- ejes desde los cilindros -------------------------------------------------------
+
+AXIS_ANGLE_TOL = math.radians(1.0)   # paralelo / perpendicular
+AXIS_DISTANCE_TOL_MM = 1.0           # dos cilindros sobre la misma recta
+MIN_AXIS_RADIUS_MM = 8.0             # un agujero de tornillo no es un eje
+# Superficies de radio enorme (curvas suaves de la carcasa) no son ejes.
+MAX_AXIS_RADIUS_FRACTION = 0.5
+
+
+@dataclass
+class _Line:
+    point: Vec
+    direction: Vec
+    radius: float                      # el cilindro más grande sobre la recta
+    count: int = 1
+
+    def holds(self, point, direction) -> bool:
+        if abs(abs(_dot(self.direction, direction)) - 1.0) > 1 - math.cos(AXIS_ANGLE_TOL):
+            return False
+        v = _sub(point, self.point)
+        along = _dot(v, self.direction)
+        off = [a - along * b for a, b in zip(v, self.direction)]
+        return math.sqrt(_dot(off, off)) <= AXIS_DISTANCE_TOL_MM
+
+
+def _lines(part: Part) -> list[_Line]:
+    """Los cilindros de la parte agrupados por recta."""
+    lo, hi = part.mesh.bounds() if len(part.mesh) else ((0, 0, 0), (0, 0, 0))
+    size = max((b - a for a, b in zip(lo, hi)), default=0.0) or math.inf
+    out: list[_Line] = []
+    for point, direction, radius in part.cylinders:
+        if radius < MIN_AXIS_RADIUS_MM or radius > MAX_AXIS_RADIUS_FRACTION * size:
+            continue
+        d = _unit(list(direction))
+        for line in out:
+            if line.holds(point, d):
+                line.radius = max(line.radius, radius)
+                line.count += 1
+                break
+        else:
+            out.append(_Line(list(point), d, radius))
+    return out
+
+
+def _direction_ok(j: int, d: Vec, found: list[tuple[Vec, Vec]], up: Vec) -> bool:
+    """La dirección que le toca a cada eje de un robot de 6 ejes."""
+    tol = math.sin(AXIS_ANGLE_TOL)
+    parallel = lambda a: abs(abs(_dot(a, d)) - 1.0) <= 1 - math.cos(AXIS_ANGLE_TOL)  # noqa: E731
+    perpendicular = lambda a: abs(_dot(a, d)) <= tol                                # noqa: E731
+    if j == 0:
+        return parallel(up)                 # J1 vertical
+    if j == 2:
+        return parallel(found[1][0])        # J3 paralelo a J2
+    return perpendicular(found[j - 1][0])   # J2, J4, J5, J6: perpendicular al anterior
+
+
+def find_axes(links: list[Part], up: Vec) -> list[tuple[Vec, Vec]]:
+    """(dirección, punto) de J1..J6 en coordenadas del ensamble. `links`:
+    base, J1..J6. Cada eje es la recta que comparten los cilindros de las
+    dos partes que une; si hay varias, la de cilindros más grandes."""
+    lines = [_lines(p) for p in links]
+    names = ["la base"] + [f"J{i}" for i in range(1, 7)]
+    found: list[tuple[Vec, Vec]] = []
+    for j in range(6):
+        best, best_score = None, -1.0
+        for a in lines[j]:
+            if not _direction_ok(j, a.direction, found, up):
+                continue
+            for b in lines[j + 1]:
+                if b.holds(a.point, a.direction) and a.radius + b.radius > best_score:
+                    best, best_score = a, a.radius + b.radius
+        if best is None:
+            raise ValueError(
+                f"no se encontró el eje de J{j + 1}: «{links[j].name}» ({names[j]}) y "
+                f"«{links[j + 1].name}» ({names[j + 1]}) no tienen cilindros sobre una misma "
+                f"recta con la dirección que corresponde. ¿Es un robot de 6 ejes de la familia "
+                f"BRTIRUS?")
+        found.append((best.direction, best.point))
+    return found
 
 
 def _forward(d: Vec) -> Vec:

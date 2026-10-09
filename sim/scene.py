@@ -5,11 +5,17 @@ Lo que el visor 3D necesita y se puede probar sin placa de video:
   cero, en coordenadas del mundo. Si el JSON del modelo trae `"meshes"` (un
   archivo por eslabón, exportado del CAD del fabricante en la posición cero),
   se usan esos; si no, piezas simples a partir de las cotas.
-- `Layout`: los objetos importados para armar la celda, guardables en JSON.
+- `Layout`: los objetos importados para armar la celda, guardables en JSON,
+  y dónde está parado el robot (`robot_base`).
 - `Timeline`: la trayectoria simulada como función del tiempo.
 
 Con producto de exponenciales, cada eslabón dibujado en la posición cero se
-ubica con `model.joint_frames(q)[i]`: no hace falta ningún otro ajuste.
+ubica con `model.joint_frames(q)[i]` en coordenadas de la BASE del robot. La
+celda tiene sus propias coordenadas (piso en z = 0): el robot se para donde
+dice `Layout.robot_base` (X, Y, Z, Rx, Ry, Rz), y todo lo del robot (eslabones,
+trayectoria, sistemas de coordenadas del pad) se lleva a la celda con
+`base_matrix`. Las piezas ya están en coordenadas de la celda. Con el robot en
+el origen (lo de siempre) las dos coinciden.
 """
 
 from __future__ import annotations
@@ -21,7 +27,7 @@ import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from sim.kinematics import MODELS_DIR, RobotModel, model_path
+from sim.kinematics import MODELS_DIR, Matrix, RobotModel, model_path, pose_matrix
 from sim.meshes import Mesh, box, cylinder, load_mesh
 from sim.pad_sim import Segment, SimResult, untrapezoid
 
@@ -90,7 +96,7 @@ def _simple_links(m: RobotModel, tool_axis: bool = True) -> list[Mesh]:
 class LayoutObject:
     name: str
     path: str                 # archivo STEP/STL/OBJ
-    x: float = 0.0            # mm, respecto de la base del robot
+    x: float = 0.0            # mm, en coordenadas de la celda
     y: float = 0.0
     z: float = 0.0
     rz: float = 0.0           # grados alrededor del eje vertical
@@ -117,6 +123,13 @@ class Layout:
     tool_mount: list[float] = field(default_factory=lambda: [0.0] * 6)
     margin_mm: float = 20.0
     collisions: bool = True                   # buscar choques al simular
+    # Dónde está parado el robot en la celda: X, Y, Z (mm) y Rx, Ry, Rz (°),
+    # con la convención de `pose_matrix` (gira en X, después en Y, después en
+    # Z, sobre los ejes fijos de la celda). Todo en cero: en el origen, parado.
+    robot_base: list[float] = field(default_factory=lambda: [0.0] * 6)
+
+    def base_matrix(self) -> Matrix:
+        return base_matrix(self.robot_base)
 
     def save(self, path: str | Path) -> None:
         path = Path(path)
@@ -127,6 +140,7 @@ class Layout:
             "tool_mesh": _relative(self.tool_mesh, path) if self.tool_mesh else "",
             "tool_mount": list(self.tool_mount),
             "tool_drive_id": self.tool_drive_id,
+            "robot_base": list(self.robot_base),
             # Claves como texto: JSON no tiene claves numéricas.
             "tools": {str(k): list(v) for k, v in sorted(self.tools.items())},
             "frames": {str(k): list(v) for k, v in sorted(self.frames.items())},
@@ -160,6 +174,9 @@ class Layout:
         mount = [float(x) for x in data.get("tool_mount", [0.0] * 6)]
         if len(mount) != 6 or not all(math.isfinite(x) for x in mount):
             raise ValueError("tool_mount: hacen falta 6 números (X, Y, Z, U, V, W)")
+        base = [float(x) for x in data.get("robot_base", [0.0] * 6)]
+        if len(base) != 6 or not all(math.isfinite(x) for x in base):
+            raise ValueError("robot_base: hacen falta 6 números (X, Y, Z, Rx, Ry, Rz)")
         margin = float(data.get("margin_mm", 20.0))
         if not (math.isfinite(margin) and 0 <= margin <= 1000):
             raise ValueError("margin_mm: tiene que ser un número entre 0 y 1000")
@@ -170,7 +187,13 @@ class Layout:
                    tools=poses("tools"), frames=poses("frames"), tool_mesh=tool_mesh,
                    tool_mount=mount, margin_mm=margin,
                    tool_drive_id=str(data.get("tool_drive_id", "")),
-                   collisions=bool(data.get("collisions", True)))
+                   collisions=bool(data.get("collisions", True)), robot_base=base)
+
+
+def base_matrix(pose: list[float] | None) -> Matrix:
+    """Base del robot -> celda."""
+    return pose_matrix(*(pose or [0.0] * 6))
+
 
 
 def _relative(file: str, layout_path: Path) -> str:

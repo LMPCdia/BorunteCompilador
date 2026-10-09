@@ -103,6 +103,58 @@ def test_missing_parts_are_reported(model):
         import_robot(parts, recipe(model))
 
 
+def with_cylinders(model, parts, pose_deg):
+    """Los cilindros que tendría el CAD: sobre cada eje, uno en cada parte que
+    une (rodamiento y alojamiento), y además ruido: agujeros de tornillos,
+    curvas grandes de la carcasa y, como en el CAD real, el cilindro de la
+    brida sobre la recta de J6 (que con J5 en 0° es la misma de J4)."""
+    zw, xw = model.d1 + model.a2 + model.a3, model.a1 + model.d4
+    axes = [((0, 0, 1), (0, 0, 0)), ((0, 1, 0), (model.a1, 0, model.d1)),
+            ((0, 1, 0), (model.a1, 0, model.d1 + model.a2)), ((1, 0, 0), (model.a1, 0, zw)),
+            ((0, 1, 0), (xw, 0, zw)), ((1, 0, 0), (xw, 0, zw))]
+
+    def cyl(part, direction, point, radius):
+        m = part.matrix
+        d = tuple(sum(m[i][k] * direction[k] for k in range(3)) for i in range(3))
+        part.cylinders.append((_apply(m, point), d, radius))
+
+    for j, (d, p) in enumerate(axes):
+        for part in (parts[j], parts[j + 1]):
+            cyl(part, d, p, 60.0 - 5 * j)
+            cyl(part, d, (p[0] + 40, p[1] + 25, p[2]), 4.0)           # tornillo
+    cyl(parts[2], (0, 1, 0), (model.a1, 0, model.d1 + 300), 5000.0)   # curva de la carcasa
+    cyl(parts[4], (1, 0, 0), (model.a1, 0, zw), 50.0)                 # J4 en el antebrazo
+    cyl(parts[5], (1, 0, 0), (xw, 0, zw), 55.0)                       # J6 en la muñeca
+    return parts
+
+
+@pytest.mark.parametrize("pose", [CAD_POSE, [-1.25, 3.5, -3.5, 72.0, 0.0, 20.0],
+                                  [178.0, 3.5, -3.5, 72.0, 10.0, 20.0]])   # mirando a -X
+def test_axes_are_found_from_the_cylinders(model, pose):
+    parts = with_cylinders(model, synthetic_parts(model, pose), pose)
+    robot = import_robot(parts)                                       # sin receta
+    for key in ("d1", "a1", "a2", "a3", "d4", "d6"):
+        assert robot.geometry[key] == pytest.approx(getattr(model, key), abs=0.2), key
+    for got, want in zip(robot.cad_pose_deg, pose):
+        assert abs(((got - want) + 180) % 360 - 180) < 0.05
+
+
+def test_a_part_without_its_axis_is_explained(model):
+    parts = with_cylinders(model, synthetic_parts(model, CAD_POSE), CAD_POSE)
+    parts[3].cylinders = []                                           # el brazo J3, sin cilindros
+    with pytest.raises(ValueError, match="no se encontró el eje de J3"):
+        import_robot(parts)
+
+
+def test_flange_is_the_part_without_a_link_code(model):
+    parts = synthetic_parts(model, CAD_POSE)
+    parts[-1].name = "PAR6US08F120   六轴安装头"                       # como en el 0805A
+    for p in parts[:-1]:
+        p.name = p.name.replace("PBR6US18", "PAR6US08")
+    robot = import_robot(parts, recipe(model))
+    assert robot.geometry["d6"] == pytest.approx(model.d6, abs=0.2)
+
+
 # --- ensamble STEP ----------------------------------------------------------------------
 
 

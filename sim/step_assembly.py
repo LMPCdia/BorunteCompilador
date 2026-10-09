@@ -23,7 +23,7 @@ from __future__ import annotations
 import math
 import re
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from sim.kinematics import Matrix, identity, mat_mul
@@ -33,11 +33,18 @@ _ENTITY = re.compile(r"#(\d+)\s*=\s*(.*?);\s*(?=#\d+\s*=|$)", re.S)
 _REF = re.compile(r"#(\d+)")
 
 
+# Un cilindro del CAD: (punto del eje, dirección del eje, radio), en
+# coordenadas del ensamble. Los ejes de un robot salen de acá (ver
+# sim/robot_import.py: find_axes).
+Cylinder = tuple[tuple[float, float, float], tuple[float, float, float], float]
+
+
 @dataclass
 class Part:
     name: str
     mesh: Mesh          # en coordenadas del ensamble
     matrix: Matrix      # dónde estaba la parte en el ensamble
+    cylinders: list[Cylinder] = field(default_factory=list)
 
 
 def _decode(raw: str) -> str:
@@ -168,15 +175,34 @@ class StepFile:
             out.append((self.name(rep), sdr, matrix))
         return out
 
-    def write_part(self, sdr: int, path: Path) -> None:
-        """STEP con solo lo que usa una parte (en sus propias coordenadas)."""
+    def _part_entities(self, sdr: int) -> set[int]:
         rep = self.refs(sdr)[1]
         roots = [sdr]
         # Las representaciones con la geometría cuelgan de la de la parte.
         for n in self.of_kind("SHAPE_REPRESENTATION_RELATIONSHIP"):
             if self.refs(n)[:1] == [rep]:
                 roots.append(n)
-        keep = sorted(self.closure(roots))
+        return self.closure(roots)
+
+    def cylinders(self, sdr: int, matrix: Matrix | None = None) -> list[Cylinder]:
+        """Las superficies cilíndricas de una parte, llevadas con `matrix`
+        (la ubicación de la parte en el ensamble)."""
+        m = matrix or identity()
+        out = []
+        for n in sorted(self._part_entities(sdr)):
+            if self.kind(n) != "CYLINDRICAL_SURFACE":
+                continue
+            refs, numbers = self.refs(n), self._numbers(n)
+            if not refs or not numbers:
+                continue
+            place = mat_mul(m, self.placement(refs[0]))
+            out.append(((place[0][3], place[1][3], place[2][3]),
+                        (place[0][2], place[1][2], place[2][2]), abs(numbers[-1])))
+        return out
+
+    def write_part(self, sdr: int, path: Path) -> None:
+        """STEP con solo lo que usa una parte (en sus propias coordenadas)."""
+        keep = sorted(self._part_entities(sdr))
         body = "".join(f"#{n} = {self.entities[n]};\n" for n in keep)
         path.write_bytes((self.header + "\n" + body + "ENDSEC;\nEND-ISO-10303-21;\n")
                          .encode("latin-1"))
@@ -207,7 +233,7 @@ def split_assembly(path: str | Path, progress=None,
             mesh = Mesh(skipped_faces=local.skipped_faces)
             for tri in local.triangles:
                 mesh.add(*(_apply(matrix, p) for p in tri))
-            out.append(Part(name, mesh, matrix))
+            out.append(Part(name, mesh, matrix, step.cylinders(sdr, matrix)))
     return out
 
 

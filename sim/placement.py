@@ -15,8 +15,14 @@ dónde queda el ORIGEN del CAD):
   +X, -X, +Y o -Y, centrada en el otro eje y en el mismo piso.
 - `on_top`: apoyada encima de otra pieza (centrada, más un corrimiento).
 - `from_robot`: a una distancia del eje de J1, en un ángulo (0° = adelante
-  del robot, +X; 90° = a su izquierda, +Y), medida hasta el centro o hasta la
-  cara más cercana.
+  del robot, su +X; 90° = a su izquierda, su +Y), medida hasta el centro o
+  hasta la cara más cercana.
+
+Todo en coordenadas de la celda. Si el robot no está en el origen
+(`Layout.robot_base`), "el robot" es el punto de su base y "adelante" es su
++X visto desde arriba. Con el robot inclinado (en una pared, colgado) el eje
+de J1 ya no es vertical: las distancias se miden igual desde el punto de la
+base, en horizontal.
 
 Medir: `gaps` (separación entre cajas por eje) y, con python-fcl,
 `clearance` (distancia mínima real entre superficies).
@@ -28,7 +34,7 @@ import math
 from dataclasses import dataclass
 
 from sim.meshes import Mesh
-from sim.scene import LayoutObject
+from sim.scene import LayoutObject, base_matrix
 
 Vec = tuple[float, float, float]
 SIDES = ("+X", "-X", "+Y", "-Y")
@@ -90,6 +96,21 @@ def _move_base_to(obj: LayoutObject, mesh: Mesh, target: Vec) -> Vec:
 ROBOT_BASE = Box((0.0, 0.0, 0.0), (0.0, 0.0, 0.0))  # el origen: eje de J1, en el piso
 
 
+def robot_box(base: list[float] | None = None) -> Box:
+    """La base del robot como referencia (un punto: donde está parado)."""
+    x, y, z = (base or [0.0] * 6)[:3]
+    return Box((x, y, z), (x, y, z))
+
+
+def _robot_origin(base: list[float] | None) -> tuple[float, float, float]:
+    """(x, y) de la base y hacia dónde mira el robot visto desde arriba (°)."""
+    m = base_matrix(base)
+    heading = 0.0
+    if math.hypot(m[0][0], m[1][0]) > 1e-6:   # su +X no apunta derecho arriba o abajo
+        heading = math.degrees(math.atan2(m[1][0], m[0][0]))
+    return m[0][3], m[1][3], heading
+
+
 def offset_from(obj: LayoutObject, mesh: Mesh, ref: Box, dx: float, dy: float, dz: float) -> Vec:
     rb = ref.base
     return _move_base_to(obj, mesh, (rb[0] + dx, rb[1] + dy, rb[2] + dz))
@@ -118,11 +139,14 @@ def on_top(obj: LayoutObject, mesh: Mesh, ref: Box, dx: float = 0.0, dy: float =
 
 
 def from_robot(obj: LayoutObject, mesh: Mesh, distance: float, angle_deg: float,
-               to_face: bool = True) -> Vec:
-    """A `distance` mm del eje de J1, en la dirección `angle_deg`. Con
-    `to_face`, la distancia es hasta la cara de la pieza que mira al robot
-    (lo que queda libre); si no, hasta su centro."""
-    ux, uy = math.cos(math.radians(angle_deg)), math.sin(math.radians(angle_deg))
+               to_face: bool = True, base: list[float] | None = None) -> Vec:
+    """A `distance` mm del eje de J1, en la dirección `angle_deg` (respecto
+    de hacia dónde mira el robot). Con `to_face`, la distancia es hasta la
+    cara de la pieza que mira al robot (lo que queda libre); si no, hasta su
+    centro. `base`: `Layout.robot_base`."""
+    ox, oy, heading = _robot_origin(base)
+    angle = math.radians(angle_deg + heading)
+    ux, uy = math.cos(angle), math.sin(angle)
     r = distance
     if to_face:
         mine = world_box(obj, mesh)
@@ -130,7 +154,7 @@ def from_robot(obj: LayoutObject, mesh: Mesh, distance: float, angle_deg: float,
         # Cuánto hay del centro de la caja a su borde en esa dirección.
         r += min(hx / abs(ux) if abs(ux) > 1e-9 else math.inf,
                  hy / abs(uy) if abs(uy) > 1e-9 else math.inf)
-    return _move_base_to(obj, mesh, (r * ux, r * uy, 0.0))
+    return _move_base_to(obj, mesh, (ox + r * ux, oy + r * uy, 0.0))
 
 
 # --- medir --------------------------------------------------------------------------
@@ -141,10 +165,12 @@ def gaps(a: Box, b: Box) -> Vec:
     return tuple(max(b.lo[i] - a.hi[i], a.lo[i] - b.hi[i]) for i in range(3))
 
 
-def axis_distance(box: Box) -> float:
-    """Distancia horizontal del eje de J1 al punto más cercano de la caja."""
-    dx = max(box.lo[0], 0.0, -box.hi[0]) if not box.lo[0] <= 0 <= box.hi[0] else 0.0
-    dy = max(box.lo[1], 0.0, -box.hi[1]) if not box.lo[1] <= 0 <= box.hi[1] else 0.0
+def axis_distance(box: Box, base: list[float] | None = None) -> float:
+    """Distancia horizontal del eje de J1 (o del punto de la base, ver arriba)
+    al punto más cercano de la caja."""
+    ox, oy, _ = _robot_origin(base)
+    dx = max(box.lo[0] - ox, ox - box.hi[0], 0.0)
+    dy = max(box.lo[1] - oy, oy - box.hi[1], 0.0)
     return math.hypot(dx, dy)
 
 

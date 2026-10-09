@@ -27,10 +27,12 @@ Leer primero `docs/ARCHITECTURE.md` y `docs/PAD_FORMAT.md`.
       layout importando STEP/STL/OBJ. Busca **choques** del brazo y la
       herramienta contra las piezas (sólidos), el piso y el propio brazo
       (python-fcl), gráficas de ejes y de la punta, navegación como Inventor,
-      ubicación de piezas por distancias y biblioteca de modelos en Google
-      Drive. Robots: **BRTIRUS1510A** (el de la celda, con la forma
-      real sacada del STEP del fabricante) y BRTIRUS1820A. Ver
-      `docs/SIMULATOR.md`
+      ubicación de piezas por distancias, el robot corrido o girado en la
+      celda (pedestal, pared, techo) y biblioteca de modelos en Google
+      Drive: sus robots aparecen en la lista Robot y se importan solos del
+      STEP del fabricante (ejes encontrados en los cilindros del CAD).
+      Robots: **BRTIRUS1510A** (el de la celda, con la forma real sacada del
+      STEP del fabricante) y BRTIRUS1820A. Ver `docs/SIMULATOR.md`
 - [x] Ejecutable de Windows de un solo archivo, construido en GitHub Actions
 - [ ] **Probar en el pad** un respaldo generado (nadie lo hizo todavía)
 - [ ] Espera de entrada, `ELSE` y variables en el pad (falta un ejemplo del

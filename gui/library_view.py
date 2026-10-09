@@ -52,9 +52,12 @@ class LibraryPanel(QWidget):
     def __init__(self, on_insert: Callable[[Path, library.Item], None],
                  on_tool: Callable[[Path, library.Item], None],
                  on_robot: Callable[[str], None], report: Callable[[str, str], None],
-                 settings: QSettings) -> None:
+                 settings: QSettings,
+                 on_catalog: Callable[[library.Catalog], None] | None = None) -> None:
         super().__init__()
         self._on_insert, self._on_tool, self._on_robot = on_insert, on_tool, on_robot
+        self._on_catalog = on_catalog or (lambda _catalog: None)
+        self._quiet = False                 # carga automática: sin red no es un error
         self._report = report
         self._settings = settings
         self.fetch = library._http          # los tests lo reemplazan
@@ -153,7 +156,8 @@ class LibraryPanel(QWidget):
     def _failed(self, message: str) -> None:
         self._finish()
         self.status.setText(message)
-        self._report("error", f"Biblioteca: {message}")
+        self._report("warning" if self._quiet else "error", f"Biblioteca: {message}")
+        self._quiet = False
 
     def _set_enabled(self, enabled: bool) -> None:
         self.refresh_btn.setEnabled(enabled)
@@ -167,10 +171,12 @@ class LibraryPanel(QWidget):
 
     # -- listar ------------------------------------------------------------------------
 
-    def ensure_loaded(self) -> None:
-        """Primera vez que se abre la pestaña: leer la carpeta de la web."""
-        if not self._loaded_once:
+    def ensure_loaded(self, quiet: bool = False) -> None:
+        """Primera vez que hace falta: leer la carpeta de la web. `quiet`: la
+        carga automática al abrir el simulador (sin red, es un aviso)."""
+        if not self._loaded_once and not self.busy:
             self._loaded_once = True
+            self._quiet = quiet
             self.refresh()
 
     def refresh(self) -> None:
@@ -184,6 +190,7 @@ class LibraryPanel(QWidget):
         self._run(lambda _p: library.scan(fid, fetch), self._show, "Leyendo la carpeta de Drive…")
 
     def _show(self, catalog: library.Catalog) -> None:
+        self._quiet = False
         self.catalog = catalog
         self.tree.clear()
         groups: dict[str, QTreeWidgetItem] = {}
@@ -207,6 +214,13 @@ class LibraryPanel(QWidget):
                      f"no se pueden usar: exportalos a STEP.")
         self.status.setText(text)
         self._update_buttons()
+        self._on_catalog(catalog)
+
+    def robots(self) -> list[library.Item]:
+        """Los robots de la biblioteca (vacío si todavía no se leyó)."""
+        if self.catalog is None:
+            return []
+        return [item for item in self.catalog.items if item.kind == "robot"]
 
     def fetch_by_id(self, drive_id: str, name: str) -> Path:
         """Bajar (o tomar de la caché) un archivo de la biblioteca por su ID,
@@ -253,6 +267,11 @@ class LibraryPanel(QWidget):
                   lambda path: (self.status.setText(f"«{item.name}» listo."), on_done(Path(path), item)),
                   f"Bajando «{item.name}»…")
 
+    def prepare_robot(self, item: library.Item) -> None:
+        """Bajar, importar y verificar un robot de la biblioteca (en un hilo);
+        al terminar se elige solo."""
+        self._use_robot(item)
+
     def _use_robot(self, item: library.Item) -> None:
         """Robot = STEP (geometría y mallas) + planilla de parámetros (ejes):
         se bajan los dos, se arma el modelo y se verifica la cinemática."""
@@ -277,4 +296,4 @@ class LibraryPanel(QWidget):
                 self._report("warning", f"{result.name}: {warning}")
             self._on_robot(result.name)
 
-        self._run(work, done, f"Preparando {item.robot_name or item.name}…")
+        self._run(work, done, f"Preparando {item.model_name}…")

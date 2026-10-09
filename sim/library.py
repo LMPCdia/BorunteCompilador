@@ -92,9 +92,18 @@ class Item:
 
     @property
     def robot_name(self) -> str | None:
-        """BRTIRUS1510A, si el nombre del archivo lo dice."""
-        m = re.search(r"BRTIRUS\d+[A-Z]?", self.name.upper())
-        return m.group(0) if m else None
+        """BRTIRUS1510A, si lo dice el nombre del archivo o el de su carpeta
+        (Robots/BRTIRUS1510A/…)."""
+        for text in (self.name, self.folder):
+            m = re.search(r"BRTIRUS\d+[A-Z]?", text.upper())
+            if m:
+                return m.group(0)
+        return None
+
+    @property
+    def model_name(self) -> str:
+        """Nombre del modelo de robot que se arma con este archivo."""
+        return self.robot_name or Path(self.name).stem.split()[0]
 
 
 @dataclass
@@ -327,7 +336,7 @@ def problems(catalog: Catalog) -> list[str]:
         if item.kind == "robot" and item.category.lower() != "robots":
             out.append(f"«{where}» es un robot: va en Robots/{item.robot_name or '<MODELO>'}/")
         if item.kind == "robot" and not item.robot_name:
-            out.append(f"«{where}» está en Robots pero el nombre no dice el modelo (BRTIRUSxxxxA)")
+            out.append(f"«{where}» está en Robots pero ni el nombre ni la carpeta dicen el modelo (BRTIRUSxxxxA)")
         if item.kind == "robot" and not item.params_id and item.datasheet_id:
             out.append(f"«{where}»: está el datasheet «{item.datasheet_name}» pero falta la "
                        f"planilla de parámetros: pedirle a Claude que la arme desde el PDF")

@@ -59,9 +59,12 @@ LEEME de la carpeta):
 3. la **planilla «Parámetros <MODELO>»** (Google Sheet; formato en
    `sim/robot_params.py`), que es lo que la app usa para los ejes.
 
-En la app, *Usar este robot* lee la planilla, importa el STEP si hace falta,
-compara cotas y alcance con el CAD y verifica la cinemática inversa
-(`prepare_from_library`).
+En la app, el robot aparece en la lista **Robot** de Simulación 3D («BRTIRUSxxxxA
+(biblioteca)») y en la pestaña Biblioteca (*Usar este robot*): lee la
+planilla, importa el STEP si hace falta, compara cotas y alcance con el CAD y
+verifica la cinemática inversa (`prepare_from_library`). **Eso lo hace la
+app en la PC del usuario: no hace falta que Claude importe nada ni que se
+publique un .exe nuevo.** Claude solo arma la planilla desde el PDF (abajo).
 
 ### Armar la planilla desde el PDF (la rutina lo hace sola)
 
@@ -118,16 +121,16 @@ y sin verificación.
    ```bash
    python -m sim.robot_import robot.step --name BRTIRUSxxxxA --joints-from BRTIRUS1510A --out sim/models
    ```
-3. **Verificar antes de confiar** (el importador está calibrado con el 1510A;
-   `BORUNTE_RECIPE` dice en qué cilindro de cada parte está cada eje):
-   - El **alcance** que imprime tiene que coincidir con el del modelo (el
-     1510A dio 1511 mm). Si no coincide, la receta no sirve para este robot:
-     buscá los ejes con los cilindros grandes de cada parte (como se hizo en
-     el 1510A: agrupar `CYLINDRICAL_SURFACE` por eje y radio) y ajustá una
-     receta propia. No publiques un robot con el alcance mal.
-   - Las partes tienen que llamarse `PBR…A000`..`F000` + la brida sin código.
-     Si `import_robot` dice que falta una, mirá los nombres con
-     `StepFile(path).parts()`.
+3. **Verificar antes de confiar** (los ejes salen solos de los cilindros del
+   STEP, `find_axes`; validado con el plano del 0805A):
+   - Las cotas y el **alcance** que imprime tienen que coincidir con el plano
+     "BASIC SIZE" del datasheet (el alcance es el radio del "P-point", el
+     centro de la muñeca). Si no coinciden, mirá qué recta eligió
+     `find_axes` para cada eje (los cilindros de cada parte están en
+     `Part.cylinders`). No publiques un robot con el alcance mal.
+   - Las partes tienen que llamarse `…A000`..`F000` (el prefijo cambia con el
+     modelo) + la brida, que es la que queda. Si `import_robot` dice que
+     falta una, mirá los nombres con `StepFile(path).parts()`.
    - Mirá la nota del antebrazo corrido: si lo centró, el antebrazo tiene que
      quedar simétrico en Y (`robot_link_meshes(model)[4].bounds()`).
    - Dibujalo en 3 poses (cero, HOME, una girada) con `xvfb-run` +

@@ -361,7 +361,7 @@ def prepare_from_library(item, fetch, cache_dir: Path, models_dir: Path,
     from sim import library
     from sim.kinematics import RobotModel, model_path
 
-    name = item.robot_name or Path(item.name).stem.split()[0]
+    name = item.model_name
     params = None
     if item.params_id:
         progress(f"Leyendo «{item.params_name}»…")

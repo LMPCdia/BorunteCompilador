@@ -36,18 +36,37 @@ pasó a F9 (F6 es encuadrar, como en Inventor). Código: `gui/camera_nav.py`.
 ## Layout de la celda
 
 **Importar objeto…** acepta **STEP**, STL y OBJ (mm). La pieza se apoya en el
-piso (z = 0) y se ubica con la tabla: X, Y, Z respecto de la base del robot y
+piso (z = 0) y se ubica con la tabla: X, Y, Z en coordenadas de la celda y
 giro alrededor del eje vertical. **Guardar layout…** escribe un
 `.layout.json` con rutas relativas, así la carpeta se puede mover entera.
 
+### El robot en la celda (`Layout.robot_base`)
+
+Pestaña **Celda**, arriba: **Robot en la celda** con X, Y, Z (mm) y Rx, Ry, Rz
+(°) de su base, y botones **Girar 90° en X / Y / Z** (sobre los ejes fijos de
+la celda; Shift+clic gira -90°) y **Al origen**. Sirve para subirlo a un
+pedestal, correrlo dentro de la celda o montarlo en una pared o colgado.
+
+- La celda tiene sus coordenadas, con el piso en z = 0. Las piezas y el piso
+  quedan ahí; el robot, su trayectoria y los sistemas de coordenadas del pad
+  (que son respecto de su base) se mueven con él. Los puntos `WORLD(...)` del
+  programa siguen siendo respecto de la base del robot, como en el pad.
+- Choques, distancias y "a una distancia del robot" usan la base donde está.
+  "Adelante" es el +X del robot visto desde arriba.
+- Rx, Ry, Rz: giro en X, después en Y, después en Z, sobre ejes fijos (la
+  misma convención que `pose_matrix`).
+- El simulador **no sabe si el fabricante permite** montar el robot inclinado
+  o colgado (eso es del datasheet): solo lo dibuja y busca choques.
+- Una celda vieja (sin `robot_base`) tiene el robot en el origen, como antes.
+
 ### Ubicar piezas por distancias (`sim/placement.py`)
 
-Pestaña **Piezas**: elegí la pieza en la tabla (una recién importada ya queda
+Pestaña **Celda**: elegí la pieza en la tabla (una recién importada ya queda
 elegida) y en **Ubicar**:
 
 | Modo | Qué se indica |
 |---|---|
-| A una distancia del robot | distancia al eje de J1 (hasta la cara más cercana o hasta el centro) y ángulo (0° = adelante, +X; 90° = a la izquierda, +Y) |
+| A una distancia del robot | distancia al eje de J1 (hasta la cara más cercana o hasta el centro) y ángulo (0° = adelante del robot, su +X; 90° = a su izquierda) |
 | Corrida respecto de… | ΔX, ΔY, ΔZ desde la base del robot o desde otra pieza |
 | Al lado de… | lado (+X, -X, +Y, -Y) y separación entre caras, centrada y en el mismo piso |
 | Encima de… | apoyada arriba de otra pieza, con corrimiento ΔX, ΔY |
@@ -84,9 +103,15 @@ Clasificación **por carpeta** (no por nombre de archivo):
   usa lo ya bajado.
 - La celda guarda el ID de Drive de cada pieza y de la herramienta: abierta
   en otra PC, las baja sola.
-- Un robot nuevo se importa con los rangos y velocidades del BRTIRUS1510A
-  (hipótesis, se avisa): hay que reemplazarlos por su tabla en
-  `~/BorunteDSL/modelos/<MODELO>.json`.
+- **Los robots de la biblioteca aparecen en la lista Robot** de la pestaña
+  Simulación 3D (la biblioteca se lee sola, en segundo plano, la primera vez
+  que se abre el simulador; sin red queda un aviso). Los que todavía no están
+  en la PC dicen *(biblioteca)*: al elegirlos se hace lo
+  mismo que *Usar este robot* (STEP + planilla, importar, verificar) y queda
+  elegido al terminar. Antes de leer la carpeta, la lista ofrece *Robots de
+  la biblioteca…*.
+- Un robot sin planilla se importa con los rangos y velocidades del
+  BRTIRUS1510A (hipótesis, se avisa).
 - Límite: la vista web de Drive muestra hasta unos cientos de archivos por
   carpeta.
 - Revisar la carpeta desde la consola: `python -m sim.library` muestra el
@@ -238,20 +263,46 @@ par de minutos. Qué hace:
    Borunte vienen en GBK, que OpenCascade descarta. Las caras que gmsh no
    puede mallar (pasa con superficies periódicas del CAD) se dejan afuera y se
    avisa; en el 1510A fueron 2 de ~8000.
-2. **Lleva cada eslabón a la posición cero** (`sim/robot_import.py`). El
+2. **Encuentra los ejes** (`find_axes`): cada eje es la recta donde las dos
+   partes que une tienen cilindros (rodamiento o reductor de una, alojamiento
+   de la otra), con la dirección que le toca (J1 vertical, J2 ⟂ J1, J3 ∥ J2,
+   J4 ⟂ J3, J5 ⟂ J4, J6 ⟂ J5); entre varias, la de cilindros más grandes. No
+   se mide nada a mano, así que sirve para cualquier modelo de la familia.
+3. **Lleva cada eslabón a la posición cero** (`sim/robot_import.py`). El
    ensamble viene en cualquier pose (el del 1510A: J1 -1.25°, J2 3.5°, J3
-   -3.5°, J4 72°). Cada eje se ubica con los cilindros de los rodamientos y se
-   "desgira" de J1 a J6: es la inversa exacta del producto de exponenciales.
-3. **Mide las cotas** (d1, a1, a2, a3, d4, d6) de la posición cero. Control:
-   el alcance (a1 + a2 + √(d4² + a3²)) da 1511 mm para el 1510A.
-4. **Simplifica las mallas** (grilla de 6 mm, 2-3 mm en muñeca y brida):
+   -3.5°, J4 72°; el del 0805A mirando a -X). Cada eje se "desgira" de J1 a
+   J6: es la inversa exacta del producto de exponenciales.
+4. **Mide las cotas** (d1, a1, a2, a3, d4, d6) de la posición cero. Control:
+   el alcance (a1 + a2 + √(d4² + a3²)) es el radio que el plano del
+   fabricante marca para el centro de la muñeca ("P-point").
+5. **Simplifica las mallas** (grilla de 6 mm, 2-3 mm en muñeca y brida):
    ~90 mil triángulos, 4.7 MB.
 
-Las partes siguen la nomenclatura de Borunte: `PBR6US..A000` base, `B000`
-J1 (转座), `C000` brazo (大臂), `D000` J3 (三轴), `E000` J4 (四轴), `F000`
-muñeca y la brida sin código (六轴装配体). Dónde está cada eje dentro de cada
-parte (`BORUNTE_RECIPE`) se midió en el 1510A: **para otro modelo hay que
-verificarlo** (si el alcance medido no da el del nombre, la receta no sirve).
+Las partes siguen la nomenclatura de Borunte: `…A000` base, `B000` J1 (转座),
+`C000` brazo (大臂), `D000` J3 (三轴), `E000` J4 (四轴), `F000` muñeca, y la
+brida es la parte que queda (sin código en el 1510A, `F120` 六轴安装头 en el
+0805A). El prefijo cambia con el modelo (`PBR6US15` en el 1510A, `PAR6US08`
+en el 0805A).
+
+**Validación (octubre 2026)**: el BRTIRUS0805A importado así da exactamente
+las cotas del plano "BASIC SIZE" de su datasheet: d1 415.5, a2 390, a3
+117.5, d4 394, d6 119, y alcance 871.1 (el plano marca R871 para el centro de
+la muñeca); a1 = 70 (el plano no la acota, pero cierra con el R871).
+
+**El 1510A, a confirmar**: con el mismo método, J2 queda 36 mm más arriba que
+en la receta medida a mano con la que se armó el modelo que trae la app
+(`BORUNTE_RECIPE`, que tomó un cilindro de r 140 que está solo en la base
+giratoria; el método toma el par de alojamientos r 104 / r 106 que comparten
+la base giratoria y el brazo):
+
+| | d1 | a2 | alcance |
+|---|---|---|---|
+| modelo de la app (receta a mano) | 452 | 686.2 | 1511 |
+| método automático | 488 | 650 | 1475 |
+
+El resto de las cotas coincide. El modelo de la app sigue con la receta
+hasta tener el plano del 1510A o medir el robot (altura del eje de J2 sobre
+el apoyo de la base).
 
 Lo que el STEP no dice y queda como hipótesis:
 

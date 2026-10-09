@@ -344,7 +344,7 @@ def test_command_line_lists_and_points_out_what_to_fix(drive, capsys):
     out = capsys.readouterr().out
     assert "Herramientas/\n  [herramienta] antorcha.stl" in out
     assert "«1510A/BRTIRUS1510A modelo.STEP» es un robot: va en Robots/BRTIRUS1510A/" in out
-    assert "«Robots/otro.step» está en Robots pero el nombre no dice el modelo" in out
+    assert "«Robots/otro.step» está en Robots pero ni el nombre ni la carpeta dicen el modelo" in out
     assert "«Herramientas/Grippers/gripper.ipt» es CAD nativo: exportarlo a STEP" in out
     assert "mesa.SLDPRT" not in out          # al lado de su STL: es una referencia
     assert library.main(["NOCOMPARTIDA0"], fetch=drive) == 2
@@ -407,3 +407,43 @@ def test_sheet_not_yet_reviewed_against_its_pdf_is_pending(drive, capsys):
     assert _json.loads(capsys.readouterr().out) == []
     from sim.robot_params import parse_params
     parse_params(drive.sheets["S_PARAMS"])        # la fila nueva no rompe la planilla
+
+
+def test_library_robots_appear_in_the_robot_list(view, monkeypatch):
+    combo = view.model_combo
+    texts = lambda: [combo.itemText(i) for i in range(combo.count())]  # noqa: E731
+    # Antes de leer la carpeta: una entrada para ir a buscarlos.
+    assert "Robots de la biblioteca…" in texts()
+    # STEP con un nombre cualquiera, en la carpeta del modelo: el modelo sale de la carpeta.
+    view.library.fetch.folders["D_ROBOTS0000"] = page(entry("D_0805A00000", "BRTIRUS0805A", True))
+    view.library.fetch.folders["D_0805A00000"] = page(entry("F_0805", "六轴机器人模型.STEP", False))
+    view.library.fetch.files["F_0805"] = b"ISO-10303-21;"
+    view.library.fetch.modified["F_0805"] = "Fri, 09 Oct 2026 11:51:41 GMT"
+    view.library.refresh()
+    assert "Robots de la biblioteca…" not in texts()
+    label = "BRTIRUS0805A (biblioteca)"
+    assert label in texts()
+    assert "BRTIRUS1510A (biblioteca)" not in texts()   # ese ya está instalado
+
+    prepared = []
+    monkeypatch.setattr(view.library, "prepare_robot", lambda item: prepared.append(item))
+    before = view.model.name
+    combo.setCurrentText(label)
+    assert [i.model_name for i in prepared] == ["BRTIRUS0805A"]
+    assert combo.currentText() == before and view.model.name == before   # hasta que termine
+    assert view.side_tabs.currentIndex() == view.library_tab_index        # ahí se ve el avance
+
+    combo.setCurrentText("BRTIRUS1820A")                                  # los instalados, como siempre
+    assert view.model.name == "BRTIRUS1820A"
+
+
+def test_opening_the_simulator_reads_the_library_quietly(view):
+    from PySide6.QtGui import QShowEvent
+
+    reports = []
+    view.library._report = lambda severity, text: reports.append(severity)
+    view.library.fetch.online = False
+    view.showEvent(QShowEvent())
+    assert view.library._loaded_once
+    assert view.library.status.text() == "sin red"
+    assert reports == ["warning"]           # sin red no es un error al abrir el simulador

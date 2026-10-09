@@ -67,7 +67,7 @@ def check_collisions(result: SimResult, model: RobotModel, layout: Layout) -> li
     checker = collision.CollisionChecker(
         model, robot_link_meshes(model, tool_axis=False), obstacles, tool_mesh=tool,
         tool_mount=layout.tool_mount, margin_mm=layout.margin_mm,
-        approximate_robot=not has_real_meshes(model))
+        approximate_robot=not has_real_meshes(model), base=layout.base_matrix())
     result.issues.extend(checker.check(result).issues)
     return notes
 
