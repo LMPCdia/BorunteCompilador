@@ -103,9 +103,13 @@ Cada robot de la biblioteca es una carpeta `Robots/<MODELO>/` con:
   *Parámetros BRTIRUS1510A*, copiarla para otro robot) → por eje: rango,
   velocidad máxima, aceleración máxima, sentido de giro, si está confirmado;
   y datos generales: alcance, carga, velocidad lineal máxima, cotas del plano;
-- opcional, el PDF del datasheet (la app no lo lee: es para quien completa la
-  planilla). Un PDF no se interpreta solo a propósito: un número mal leído de
+- el **datasheet en PDF** del fabricante: la fuente de los datos. La app no lo
+  lee (lo abre con *Ver datasheet*); la planilla se arma a partir de él, a
+  mano o pidiéndoselo a Claude (skill `actualizar-simulador`), y alguien la
+  confirma. Un PDF no se interpreta solo a propósito: un número mal leído de
   un datasheet en chino terminaría moviendo el robot real.
+
+`python -m sim.library` avisa si a un robot le falta el PDF o la planilla.
 
 **Usar este robot** (pestaña Biblioteca) hace todo solo:
 

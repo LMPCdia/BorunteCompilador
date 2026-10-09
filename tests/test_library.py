@@ -52,6 +52,7 @@ class FakeDrive:
                                  entry("F_PDF", "plano mesa.pdf", False)),
             "D_1510A00000": page(entry("F_ROBOT", "BRTIRUS1510A modelo.STEP", False),
                                  entry("S_PARAMS", "Parámetros BRTIRUS1510A", False, sheet=True),
+                                 entry("F_PDF1510", "BRTIRUS1510A datasheet.pdf", False),
                                  entry("ROOT00000000", "vuelta a la raíz", True)),
         }
         from tests.test_robot_params import SHEET
@@ -347,3 +348,27 @@ def test_command_line_lists_and_points_out_what_to_fix(drive, capsys):
     assert "«Herramientas/Grippers/gripper.ipt» es CAD nativo: exportarlo a STEP" in out
     assert "mesa.SLDPRT" not in out          # al lado de su STL: es una referencia
     assert library.main(["NOCOMPARTIDA0"], fetch=drive) == 2
+
+
+def test_datasheet_pdf_is_found_and_reported(drive, view, capsys, monkeypatch):
+    catalog = library.scan("ROOT00000000", drive)
+    robot = next(i for i in catalog.items if i.robot_name == "BRTIRUS1510A")
+    assert robot.datasheet_name == "BRTIRUS1510A datasheet.pdf"
+    assert robot.datasheet_url == "https://drive.google.com/file/d/F_PDF1510/view"
+    issues = library.problems(catalog)
+    assert any("otro.step" in i and "falta el datasheet en PDF" in i for i in issues)
+    # PDF sin planilla: se pide armarla desde el PDF.
+    drive.folders["D_ROBOTS0000"] = page(entry("F_OTRO", "BRTIRUS2010A.step", False),
+                                         entry("F_PDF2010", "BRTIRUS2010A.pdf", False))
+    issues = library.problems(library.scan("ROOT00000000", drive))
+    assert any("pedirle a Claude que la arme desde el PDF" in i for i in issues)
+
+    opened = []
+    import PySide6.QtGui as gui
+    monkeypatch.setattr(gui.QDesktopServices, "openUrl", lambda url: opened.append(url.toString()) or True)
+    view.library.refresh()
+    item = _select(view, "BRTIRUS1510A modelo.STEP")
+    assert item.text(1) == "Robot (planilla, PDF)"
+    assert view.library.datasheet_btn.isEnabled()
+    assert view.library.open_datasheet()
+    assert opened == ["https://drive.google.com/file/d/F_PDF1510/view"]

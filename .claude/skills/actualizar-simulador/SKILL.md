@@ -50,16 +50,40 @@ palabra a `TOOL_WORDS` (y un test).
 
 ## 2. Robot nuevo
 
-Un robot es su carpeta `Robots/<MODELO>/` con el STEP y la **planilla de
-parámetros** (copiar la Google Sheet *Parámetros BRTIRUS1510A* y completarla
-con el datasheet; formato en `sim/robot_params.py`). En la app, *Usar este
-robot* lee la planilla, importa el STEP si hace falta, compara cotas y
-alcance con el CAD y verifica la cinemática inversa
-(`prepare_from_library`). Si el usuario pasa el datasheet en PDF o imagen,
-**no completes la planilla adivinando**: transcribí solo lo que se lee con
-certeza, marcá "Confirmado: no" en lo dudoso y mostrále al usuario los
-valores para que los confirme. Las celdas se escriben con el conector de
-Google Sheets (`update_values`), sin tocar el formato de la planilla.
+Un robot es su carpeta `Robots/<MODELO>/` con tres cosas (así lo pide el
+LEEME de la carpeta):
+
+1. el **STEP del ensamble** del fabricante (obligatorio);
+2. el **datasheet en PDF** (fuente de los datos; la app no lo lee, solo lo
+   abre con *Ver datasheet*);
+3. la **planilla «Parámetros <MODELO>»** (Google Sheet; formato en
+   `sim/robot_params.py`), que es lo que la app usa para los ejes.
+
+En la app, *Usar este robot* lee la planilla, importa el STEP si hace falta,
+compara cotas y alcance con el CAD y verifica la cinemática inversa
+(`prepare_from_library`).
+
+### Armar la planilla desde el PDF
+
+Cuando `python -m sim.library` dice "está el datasheet … pero falta la
+planilla", o el usuario lo pide:
+
+1. Bajar el PDF (ID de `Item.datasheet_id`) con
+   `curl -L -o ds.pdf "https://drive.usercontent.google.com/download?id=<ID>&export=download&confirm=t"`
+   al scratchpad y leerlo con la herramienta Read (páginas de a 20). Si es
+   escaneado o en chino, leer las imágenes con cuidado.
+2. Copiar la planilla del 1510A a la carpeta del robot: `copy_file` de
+   `10p1u009Q3EEa8RKT2w4vAlHO6KkgjUvT9q4enW9e-ss` con `parentId` = carpeta del
+   robot y título `Parámetros <MODELO>`, y cambiar B1 por el modelo.
+3. Llenar con `update_values` (Google Sheets) solo las celdas de datos (B4:G9
+   ejes, B12:B21 generales), sin tocar el formato. **No adivines**: lo que no
+   se lee con certeza queda vacío o con "Confirmado: no" y una nota que diga
+   de qué página salió o por qué hay duda. Rango "±165°" se escribe tal cual.
+   Las aceleraciones casi nunca están en el datasheet: dejarlas vacías.
+4. Mostrarle al usuario la tabla transcripta con la página de cada dato y
+   pedirle que confirme; recién ahí poner "sí" en Confirmado.
+5. Verificar con `python -m sim.library` (ya no debe pedir la planilla) y, si
+   el robot está en la app, `prepare_from_library` (cinemática 60/60).
 
 Un robot que el usuario va a usar seguido conviene **traerlo a la app**
 (`sim/models/`), como el BRTIRUS1510A: así funciona sin red y queda probado.

@@ -82,6 +82,12 @@ class Item:
     params_id: str = ""     # planilla de parámetros de la carpeta (solo robots)
     params_kind: str = ""   # "sheet" | "csv"
     params_name: str = ""
+    datasheet_id: str = ""  # PDF del fabricante en la carpeta (solo para verlo)
+    datasheet_name: str = ""
+
+    @property
+    def datasheet_url(self) -> str:
+        return f"https://drive.google.com/file/d/{self.datasheet_id}/view" if self.datasheet_id else ""
 
     @property
     def robot_name(self) -> str | None:
@@ -167,6 +173,10 @@ def scan(root: str, fetch: Fetch = _http) -> Catalog:
         seen.add(fid)
         entries = list_folder(fid, fetch)
         params = _params_entry(entries)
+        pdf = next((e for e in entries if not e.is_folder and e.name.lower().endswith(".pdf")
+                    and any(w in e.name.lower() for w in ("datasheet", "ficha", "spec", "manual"))),
+                   None) or next((e for e in entries if not e.is_folder
+                                  and e.name.lower().endswith(".pdf")), None)
         for entry in entries:
             if entry.is_folder:
                 if depth < MAX_DEPTH:
@@ -183,6 +193,8 @@ def scan(root: str, fetch: Fetch = _http) -> Catalog:
             if kind == "robot" and params is not None:
                 extra = {"params_id": params.id, "params_name": params.name,
                          "params_kind": "sheet" if params.is_sheet else "csv"}
+            if kind == "robot" and pdf is not None:
+                extra.update(datasheet_id=pdf.id, datasheet_name=pdf.name)
             items.append(Item(entry.id, entry.name, category, folder, kind, **extra))
     return Catalog(items, unusable)
 
@@ -273,9 +285,14 @@ def problems(catalog: Catalog) -> list[str]:
             out.append(f"«{where}» es un robot: va en Robots/{item.robot_name or '<MODELO>'}/")
         if item.kind == "robot" and not item.robot_name:
             out.append(f"«{where}» está en Robots pero el nombre no dice el modelo (BRTIRUSxxxxA)")
-        if item.kind == "robot" and not item.params_id:
+        if item.kind == "robot" and not item.params_id and item.datasheet_id:
+            out.append(f"«{where}»: está el datasheet «{item.datasheet_name}» pero falta la "
+                       f"planilla de parámetros: pedirle a Claude que la arme desde el PDF")
+        elif item.kind == "robot" and not item.params_id:
             out.append(f"«{where}»: falta la planilla de parámetros en su carpeta (copiar "
                        f"«Parámetros BRTIRUS1510A» y completarla con el datasheet)")
+        if item.kind == "robot" and not item.datasheet_id:
+            out.append(f"«{where}»: falta el datasheet en PDF en su carpeta")
     # CAD nativo al lado de un STEP es una copia de referencia (como las piezas
     # de SolidWorks junto al ensamble del robot): solo molesta si en esa
     # carpeta no hay nada que el simulador pueda usar.

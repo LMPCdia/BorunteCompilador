@@ -83,6 +83,9 @@ class LibraryPanel(QWidget):
         self.tool_btn.clicked.connect(lambda: self.use_selected("herramienta"))
         self.robot_btn = QPushButton("Usar este robot")
         self.robot_btn.clicked.connect(lambda: self.use_selected("robot"))
+        self.datasheet_btn = QPushButton("Ver datasheet")
+        self.datasheet_btn.setToolTip("Abre el PDF del fabricante en el navegador")
+        self.datasheet_btn.clicked.connect(self.open_datasheet)
         self.status = QLabel("La biblioteca se lee de Google Drive al abrir esta pestaña.")
         self.status.setWordWrap(True)
 
@@ -93,7 +96,7 @@ class LibraryPanel(QWidget):
         row.addWidget(self.refresh_btn)
         layout.addLayout(row)
         layout.addWidget(self.tree, 1)
-        for button in (self.insert_btn, self.tool_btn, self.robot_btn):
+        for button in (self.insert_btn, self.tool_btn, self.robot_btn, self.datasheet_btn):
             layout.addWidget(button)
         layout.addWidget(self.status)
         note = QLabel("Se clasifica por carpeta: «Robots» (o un STEP que diga BRTIRUS) → robot; "
@@ -189,7 +192,13 @@ class LibraryPanel(QWidget):
             if category not in groups:
                 groups[category] = QTreeWidgetItem(self.tree, [category, ""])
                 groups[category].setExpanded(True)
-            child = QTreeWidgetItem(groups[category], [item.name, KIND_LABEL[item.kind]])
+            kind = KIND_LABEL[item.kind]
+            if item.kind == "robot":
+                extras = ["planilla" if item.params_id else "sin planilla"]
+                if item.datasheet_id:
+                    extras.append("PDF")
+                kind += " (" + ", ".join(extras) + ")"
+            child = QTreeWidgetItem(groups[category], [item.name, kind])
             child.setData(0, Qt.ItemDataRole.UserRole, index)
             child.setToolTip(0, f"{item.folder}/{item.name}" if item.folder else item.name)
         text = f"{len(catalog.items)} modelo(s) en {len(groups)} carpeta(s)."
@@ -219,6 +228,16 @@ class LibraryPanel(QWidget):
         self.insert_btn.setEnabled(item is not None)
         self.tool_btn.setEnabled(item is not None)
         self.robot_btn.setEnabled(item is not None and item.kind == "robot")
+        self.datasheet_btn.setEnabled(item is not None and bool(item.datasheet_id))
+
+    def open_datasheet(self) -> bool:
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
+        item = self.selected()
+        if item is None or not item.datasheet_id:
+            return False
+        return QDesktopServices.openUrl(QUrl(item.datasheet_url))
 
     def use_selected(self, how: str | None = None) -> None:
         item = self.selected()
