@@ -53,10 +53,16 @@ class LibraryPanel(QWidget):
                  on_tool: Callable[[Path, library.Item], None],
                  on_robot: Callable[[str], None], report: Callable[[str, str], None],
                  settings: QSettings,
-                 on_catalog: Callable[[library.Catalog], None] | None = None) -> None:
+                 on_catalog: Callable[[library.Catalog], None] | None = None,
+                 on_progress: Callable[[str, str | None, str], None] | None = None) -> None:
         super().__init__()
         self._on_insert, self._on_tool, self._on_robot = on_insert, on_tool, on_robot
         self._on_catalog = on_catalog or (lambda _catalog: None)
+        # Avance de lo que está haciendo (texto, robot que se prepara, estado
+        # "trabajando" / "listo" / "error"): para mostrarlo donde el usuario
+        # está mirando, no solo en esta pestaña.
+        self._on_progress = on_progress or (lambda _text, _robot, _state: None)
+        self.preparing: str | None = None   # robot que se está bajando e importando
         self._quiet = False                 # carga automática: sin red no es un error
         self._report = report
         self._settings = settings
@@ -117,13 +123,13 @@ class LibraryPanel(QWidget):
 
     def _run(self, fn, on_done: Callable[[object], None], busy_text: str) -> None:
         if self.busy:
-            self._report("warning", "La biblioteca está ocupada: esperá a que termine.")
+            self._report_busy()
             return
-        self.status.setText(busy_text)
+        self._set_status(busy_text)
         self._set_enabled(False)
         if self.sync:
             try:
-                result = fn(self.status.setText)
+                result = fn(self._set_status)
             except Exception as e:  # noqa: BLE001
                 self._failed(str(e))
             else:
@@ -134,12 +140,21 @@ class LibraryPanel(QWidget):
         # Métodos de objetos del hilo de la interfaz (no lambdas): así Qt
         # entrega las señales en ESE hilo. Una lambda correría en el hilo de
         # trabajo, tocaría la interfaz desde ahí y se esperaría a sí misma.
-        task.progress.connect(self.status.setText)
+        task.progress.connect(self._set_status)
         task.done.connect(self._task_done)
         task.failed.connect(self._failed)
         self._pending_done = on_done
         self._task = task
         task.start()
+
+    def _report_busy(self) -> None:
+        self._report("warning", f"La biblioteca está ocupada ({self.status.text()}): esperá a "
+                                f"que termine.")
+
+    def _set_status(self, text: str, robot: str | None = None, state: str | None = None) -> None:
+        self.status.setText(text)
+        self._on_progress(text, robot or self.preparing,
+                          state or ("trabajando" if self.busy or self.preparing else "listo"))
 
     def _task_done(self, result) -> None:
         on_done, self._pending_done = self._pending_done, None
@@ -151,11 +166,13 @@ class LibraryPanel(QWidget):
         if self._task is not None:
             self._task.wait()        # que termine de salir antes de soltarlo
             self._task = None
+        self.preparing = None
         self._set_enabled(True)
 
     def _failed(self, message: str) -> None:
+        robot = self.preparing
         self._finish()
-        self.status.setText(message)
+        self._set_status(message, robot, "error")
         self._report("warning" if self._quiet else "error", f"Biblioteca: {message}")
         self._quiet = False
 
@@ -290,10 +307,15 @@ class LibraryPanel(QWidget):
             if result.params_source:
                 parts.append(f"ejes de «{result.params_source}»")
             parts.append(f"cinemática inversa verificada en {ok}/{n} poses")
-            self.status.setText(". ".join(parts) + "." +
-                                ("" if not result.warnings else " Ver avisos en Mensajes."))
+            self._set_status(". ".join(parts) + "." +
+                             ("" if not result.warnings else " Ver avisos en Mensajes."),
+                             result.name)
             for warning in result.warnings:
                 self._report("warning", f"{result.name}: {warning}")
             self._on_robot(result.name)
 
+        if self.busy:
+            self._report_busy()
+            return
+        self.preparing = item.model_name
         self._run(work, done, f"Preparando {item.model_name}…")

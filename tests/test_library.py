@@ -431,7 +431,6 @@ def test_library_robots_appear_in_the_robot_list(view, monkeypatch):
     combo.setCurrentText(label)
     assert [i.model_name for i in prepared] == ["BRTIRUS0805A"]
     assert combo.currentText() == before and view.model.name == before   # hasta que termine
-    assert view.side_tabs.currentIndex() == view.library_tab_index        # ahí se ve el avance
 
     combo.setCurrentText("BRTIRUS1820A")                                  # los instalados, como siempre
     assert view.model.name == "BRTIRUS1820A"
@@ -447,3 +446,64 @@ def test_opening_the_simulator_reads_the_library_quietly(view):
     assert view.library._loaded_once
     assert view.library.status.text() == "sin red"
     assert reports == ["warning"]           # sin red no es un error al abrir el simulador
+
+
+def test_preparing_a_robot_shows_its_progress_next_to_the_list(view, tmp_path, monkeypatch):
+    import json
+
+    import sim.kinematics as kinematics
+    import sim.robot_import as robot_import
+
+    models = tmp_path / "modelos"
+    models.mkdir()
+    monkeypatch.setattr(kinematics, "USER_MODELS_DIR", models)
+    view.library.models_dir = models
+
+    def fake_import(step, name, out_dir, joints_from, progress=None):
+        progress(0, 7, "PAR6US08F120")
+        data = json.loads((kinematics.MODELS_DIR / "BRTIRUS1820A.json").read_text(encoding="utf-8"))
+        (out_dir / f"{name}.json").write_text(json.dumps(data), encoding="utf-8")
+
+        class R:
+            reach_mm = 871.1
+        return out_dir / f"{name}.json", R()
+
+    monkeypatch.setattr(robot_import, "import_robot_step", fake_import)
+    seen = []
+    original = view._on_library_progress
+    monkeypatch.setattr(view, "_on_library_progress",
+                        lambda t, r, st: (seen.append((r, st, t)), original(t, r, st)))
+    view.library._on_progress = view._on_library_progress
+    view.library.fetch.folders["D_ROBOTS0000"] = page(entry("D_0805A00000", "BRTIRUS0805A", True))
+    view.library.fetch.folders["D_0805A00000"] = page(
+        entry("F_0805", "BRTIRUS0805A.STEP", False),
+        entry("S_PARAMS", "Parámetros BRTIRUS0805A", False, sheet=True))
+    view.library.fetch.files["F_0805"] = b"ISO-10303-21;"
+    view.library.fetch.modified["F_0805"] = "Fri, 09 Oct 2026 11:51:41 GMT"
+    view.library.refresh()
+    assert not view.robot_progress.isVisibleTo(view)          # leer la carpeta no se muestra ahí
+    view.model_combo.setCurrentText("BRTIRUS0805A (biblioteca)")
+    assert view.model.name == "BRTIRUS0805A"
+    states = [(r, st) for r, st, _t in seen]
+    assert ("BRTIRUS0805A", "trabajando") in states
+    assert any("parte 1 de 7" in t for _r, _st, t in seen)    # el avance de la importación
+    assert states[-1] == ("BRTIRUS0805A", "listo")
+    assert view.robot_progress.isVisibleTo(view) and "listo" in view.robot_progress.text()
+    assert view.library.preparing is None
+
+
+def test_choosing_it_again_while_it_is_being_prepared_does_not_complain(view):
+    reports = []
+    view._report = lambda severity, text: reports.append((severity, text))
+    view.library.fetch.folders["D_ROBOTS0000"] = page(entry("D_0805A00000", "BRTIRUS0805A", True))
+    view.library.fetch.folders["D_0805A00000"] = page(entry("F_0805", "x.STEP", False))
+    view.library.refresh()
+    view.library.preparing = "BRTIRUS0805A"         # como si estuviera importando
+    view.library._task = object()
+    try:
+        view.model_combo.setCurrentText("BRTIRUS0805A (biblioteca)")
+    finally:
+        view.library._task = None
+        view.library.preparing = None
+    assert [s for s, _t in reports] == ["info"]
+    assert "ya se está preparando" in reports[0][1]

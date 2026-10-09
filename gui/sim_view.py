@@ -326,9 +326,16 @@ class SimView(QWidget):
         self.cancel_btn.clicked.connect(self._on_cancel)
         self.cancel_btn.setVisible(False)
 
+        # Avance de un robot que se baja e importa de la biblioteca (tarda
+        # minutos): a la vista, al lado de la lista de robots.
+        self.robot_progress = QLabel()
+        self.robot_progress.setWordWrap(True)
+        self.robot_progress.setVisible(False)
+
         top = QHBoxLayout()
         top.addWidget(QLabel("Robot:"))
         top.addWidget(self.model_combo)
+        top.addWidget(self.robot_progress, 2)
         top.addWidget(self.source_label, 1)
         top.addWidget(open_backup_btn)
         top.addWidget(self.use_editor_btn)
@@ -505,7 +512,8 @@ class SimView(QWidget):
         self.library = LibraryPanel(on_insert=self._insert_from_library,
                                     on_tool=self._tool_from_library,
                                     on_robot=self.use_robot, report=self._report,
-                                    settings=self._settings, on_catalog=self._on_catalog)
+                                    settings=self._settings, on_catalog=self._on_catalog,
+                                    on_progress=self._on_library_progress)
         # Biblioteca y Celda primero: con el panel angosto, las últimas
         # pestañas quedan escondidas detrás de las flechitas.
         tabs = QTabWidget()
@@ -840,9 +848,21 @@ class SimView(QWidget):
     def _on_catalog(self, _catalog) -> None:
         self._fill_model_combo()
 
+    def _on_library_progress(self, text: str, robot: str | None, state: str) -> None:
+        """Solo lo de preparar un robot (leer la carpeta no hace falta mostrarlo acá)."""
+        if robot is None:
+            return
+        color = {"trabajando": "#d08000", "error": "#d04040"}.get(state, "#2f9e44")
+        icon = {"trabajando": "⏳ ", "error": "✖ "}.get(state, "✔ ")
+        self.robot_progress.setText(f"<span style='color:{color}'>{icon}{text}</span>")
+        self.robot_progress.setToolTip(text)
+        self.robot_progress.setVisible(True)
+
     def _on_model_chosen(self, index: int) -> None:
         data = self.model_combo.itemData(index)
         if data is None:
+            if not self.library.busy:
+                self.robot_progress.setVisible(False)
             self.set_model(self.model_combo.itemText(index))
             return
         # Una entrada de la biblioteca: el robot de la vista sigue siendo el
@@ -854,7 +874,13 @@ class SimView(QWidget):
         item = next((i for i in self.library.robots() if i.file_id == data[1]), None)
         if item is None:
             return
-        self.side_tabs.setCurrentIndex(self.library_tab_index)   # ahí se ve el avance
+        if self.library.preparing == item.model_name:
+            self._report("info", f"{item.model_name} ya se está preparando: "
+                                 f"{self.library.status.text()}")
+            return
+        if self.library.busy:
+            self.library._report_busy()
+            return
         self._report("info", f"Preparando {item.model_name} desde la biblioteca: se baja el "
                              f"STEP y la planilla, se importa y se verifica (unos minutos la "
                              f"primera vez).")
