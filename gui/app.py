@@ -178,6 +178,25 @@ def _self_test() -> int:
 
     paso("simular en BRTIRUS1820A e importar un STEP (gmsh)", simular_y_leer_step)
 
+    def buscar_choques():
+        # python-fcl es una extensión compilada con sus propias DLL: si el spec
+        # no las incluye, el import falla acá y no en la mano del usuario.
+        from sim import collision
+        from sim.kinematics import RobotModel, identity
+        from sim.meshes import box
+        from sim.scene import robot_link_meshes
+
+        assert collision.available(), "no se pudo importar python-fcl"
+        model = RobotModel.load("BRTIRUS1820A")
+        # Una caja donde está la muñeca en HOME: tiene que chocar.
+        caja = collision.Obstacle("caja", box((470, 0, 1117), (200, 200, 200)), identity())
+        checker = collision.CollisionChecker(model, robot_link_meshes(model, tool_axis=False),
+                                             [caja], margin_mm=0)
+        distancias = checker.distances_at([0, 45.9, -44.9, 0, -76, 0])
+        assert any(o == "caja" and d <= 0 for _p, o, d in distancias), "fcl no detecta el choque"
+
+    paso("buscar choques (python-fcl)", buscar_choques)
+
     _emit()
     fallas = 0
     for nombre, ok, detalle in pasos:

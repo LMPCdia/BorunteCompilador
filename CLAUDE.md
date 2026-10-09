@@ -42,7 +42,8 @@ respaldo real; la lógica se prueba contra `comms/robot_simulator.py`.
    `docs/MODBUS_REGISTER_MAP.md`.
 6. **No agregues dependencias nuevas sin decirlo explícitamente en tu
    resumen final.** El stack es: `lark` (parser), `pymodbus` (Modbus),
-   `PySide6` (GUI y 3D con Qt3D), `gmsh` (lectura de STEP), `pytest` (tests). Cualquier librería nueva debe
+   `PySide6` (GUI y 3D con Qt3D), `gmsh` (lectura de STEP), `python-fcl` +
+   `numpy` (choques del simulador), `pytest` (tests). Cualquier librería nueva debe
    justificarse.
 
 ## Estado actual (ver también README.md, que puede estar más actualizado)
@@ -62,7 +63,9 @@ respaldo real; la lógica se prueba contra `comms/robot_simulator.py`.
 - **`sim/`**: simulador cinemático del respaldo del pad (modelo
   BRTIRUS1820A del plano del fabricante; el 1510A, que es el robot de la
   celda, está pendiente de su plano). Pestaña "Simulación 3D" con layout de
-  piezas STEP/STL/OBJ. Ver `docs/SIMULATOR.md`.
+  piezas STEP/STL/OBJ y búsqueda de choques (`sim/collision.py`, python-fcl:
+  piezas como sólidos, piso, el propio brazo, herramienta montada en la
+  brida). Ver `docs/SIMULATOR.md`.
 - **GUI** (`gui/`): "Exportar para el pad" (Ctrl+E) + pestaña "Pad" con el
   listado; compilar/ejecutar en la VM; digitalizar puntos.
 - **`packaging/`** + `.github/workflows/build-exe.yml`: `.exe` de un solo
@@ -93,6 +96,9 @@ respaldo real; la lógica se prueba contra `comms/robot_simulator.py`.
    contenedor: `xvfb-run` + `QT_QPA_PLATFORM=xcb`.
 7. **gmsh carga su DLL con ctypes**: PyInstaller no la ve. El spec la agrega
    a mano (`GMSH_BINARIES`) y el self-test importa un STEP para verificarlo.
+   Lo mismo con las DLL de python-fcl (`FCL_BINARIES`); si la extensión no
+   carga, `fcl` se importa vacío (sin excepción): `sim.collision.available()`
+   lo detecta.
 8. **El resaltado necesita dos paletas.** Una sola pensada para fondo blanco
    queda ilegible sobre el tema oscuro de Windows. Hay un test de contraste
    WCAG 3.0:1.

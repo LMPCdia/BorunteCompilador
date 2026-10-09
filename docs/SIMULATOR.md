@@ -7,6 +7,8 @@ geométrico del robot y avisa, antes de llevar el programa al robot:
 - `MOVEL` inalcanzables (fuera de alcance, o la recta pasa por donde el brazo
   no llega);
 - saltos bruscos de un eje en un `MOVEL` (singularidad de muñeca);
+- **choques** del brazo y la herramienta contra las piezas de la celda, el
+  piso y el mismo brazo (ver "Choques");
 - tiempo de ciclo **estimado**.
 
 ```bash
@@ -28,6 +30,55 @@ giro alrededor del eje vertical. **Guardar layout…** escribe un
 Los STEP se convierten a triángulos con **gmsh** (dependencia nueva, trae
 OpenCascade; suma ~60 MB al `.exe`). La malla es gruesa a propósito: alcanza
 para ver la celda, no para medir.
+
+## Choques (`sim/collision.py`, python-fcl)
+
+Se activa en la pestaña **Choques** (activado por defecto). Después de
+simular, se recorre la trayectoria y se revisa:
+
+| Qué | Contra qué | Margen |
+|---|---|---|
+| Eslabones J1…J6 | cada pieza del layout | sí (aviso si pasa más cerca; error si toca) |
+| Herramienta montada en la brida | cada pieza del layout | sí, salvo en las piezas marcadas **Se trabaja**: ahí solo cuenta tocarla |
+| Eslabones J2…J6 y herramienta | el piso (z = 0, el plano de apoyo de la base) | sí |
+| Eslabones a 3+ ejes de distancia, herramienta contra J1…J4 | el mismo brazo | no: solo si se tocan |
+
+- **Las piezas son sólidos.** fcl compara superficies; para que un eslabón
+  metido entero adentro de una pieza cuente, cada vez que el robot aparece de
+  golpe en una pose (el primer punto, después de un salto del simulador) se
+  prueba si quedó adentro (rayo contra la malla). Entre medio el movimiento es
+  continuo y para meterse tiene que cruzar la superficie, que sí se ve.
+  Supone mallas cerradas (un STEP de sólidos lo es).
+- **No se escapa nada entre muestras.** Avance conservador: si los ejes
+  cambian Δq, ningún punto de una parte se mueve más que Σ |Δq_i|·R_i (R_i:
+  cota de la distancia de la parte al eje i, que no depende de la pose). Si la
+  distancia medida en los extremos cubre eso, el tramo está libre; si no, se
+  parte al medio hasta 3 mm. Un giro rápido de J1 no "saltea" un poste.
+- **La base no se revisa contra las piezas**: lo que la toca es el pedestal o
+  la mesa donde está atornillada.
+- **Herramienta:** el STEP/STL/OBJ de la antorcha o la pinza, dibujado en
+  coordenadas de la brida (Z saliendo de la brida). Si en el CAD no está así,
+  el campo **Montaje** (X, Y, Z, U, V, W respecto de la brida) lo acomoda. Se
+  dibuja pegada al robot. Sin herramienta cargada, se revisa hasta la brida.
+- Cada choque o cercanía es un problema con su instante: clic y la animación
+  va ahí. Durante la animación, la pieza se pinta de **rojo** mientras el
+  robot la toca y de **naranja** mientras está más cerca que el margen.
+- Margen, herramienta, montaje y qué pieza se trabaja se guardan en el
+  `.layout.json`.
+
+**Qué NO es exacto** (además de lo de "Qué está confirmado y qué no"):
+
+- **La forma del robot.** Mientras el modelo no traiga las mallas del
+  fabricante, los eslabones son cilindros aproximados y los choques son
+  estimaciones; la app lo avisa. Con las mallas reales (ver abajo) se usan esas.
+- **La trayectoria entre puntos**: el controlador real puede redondear
+  esquinas o interpolar distinto. El margen está para eso.
+- **Cables, mangueras y el alimentador de alambre** no están en ningún modelo.
+
+Dependencia: **python-fcl** (trae numpy). Sin ella el simulador funciona
+igual y la pestaña dice que los choques no se revisan. En el `.exe`, sus DLL
+(`ccd`, `octomap`) las agrega el spec (`FCL_BINARIES`) y el self-test hace un
+choque de prueba.
 
 ## Modelos 3D del robot
 
@@ -54,6 +105,7 @@ ubica solo; no hace falta ningún ajuste extra.
 | `sim/check.py` | Línea de comandos |
 | `sim/meshes.py` | Carga de STEP (gmsh), STL y OBJ; primitivas |
 | `sim/scene.py` | Eslabones del robot, layout (JSON) y línea de tiempo |
+| `sim/collision.py` | Choques con python-fcl sobre la trayectoria simulada |
 | `gui/sim_view.py`, `gui/viewport3d.py` | Pestaña "Simulación 3D" y vista Qt3D |
 
 ## Modelo geométrico
@@ -119,8 +171,8 @@ está bien; si no, la diferencia dice qué eje está invertido o desfasado.
 - Los `MOVEL` con una herramienta o un sistema de coordenadas que no se
   cargó en la pestaña se saltean (un solo aviso, y el botón "Cargar las que
   faltan" agrega las filas).
-- Sin detección de colisiones todavía: el layout se ve, pero no se chequea
-  contra el robot.
+- Choques: ver las aproximaciones en "Choques". Sin profundidad de
+  penetración (se informa "toca", no cuánto se mete).
 - La vista 3D necesita OpenGL. Sin él (máquinas virtuales, escritorio
   remoto viejo) la pestaña muestra un aviso y la simulación funciona igual.
 - `WAIT_IN` no existe en el pad todavía; los `IF` usan los estados de entrada

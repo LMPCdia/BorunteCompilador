@@ -439,3 +439,117 @@ def test_highlighting_does_not_mark_the_result_stale(app):
     window.highlighter.rehighlight()   # cambia formatos, no el texto
     QApplication.processEvents()
     assert not window.sim_view.stale
+
+
+# --- choques --------------------------------------------------------------------------
+
+WELD_SOURCE = f"""POINT p_pieza = WORLD(1097.1, -150.0, 721.9, 180.0, -10.0, 180.0)
+MOVEJ {HOME} SPEED 80
+MOVEL p_pieza + OFFSET(0, 0, 100, 0, 0, 0) SPEED 50
+MOVEL p_pieza SPEED 10
+MOVEJ {HOME} SPEED 80
+"""
+
+
+def _table_view(app, tmp_path, reports, top=730.0):
+    pytest.importorskip("fcl")
+    piece = tmp_path / "mesa.stl"
+    write_stl(box((0, 0, top / 2), (600, 400, top)), piece)
+    view = _view(app, WELD_SOURCE, reports)
+    obj = view.import_object(piece)
+    obj.x, obj.y, obj.z = 1100.0, -150.0, 0.0
+    view._refresh_objects(rebuild=False)
+    return view
+
+
+def test_collision_with_a_piece_is_an_error_in_the_simulation(app, tmp_path):
+    reports = []
+    view = _table_view(app, tmp_path, reports)
+    result = view.simulate()
+    assert view.collisions is not None and view.collisions.collisions >= 1
+    assert any(i.severity == "error" and "contra «mesa»" in i.message for i in result.issues)
+    assert any(s == "error" and "Choque: brida (J6) contra «mesa»" in m for s, m in reports)
+    assert "choque(s)" in view.summary.text()
+    # Clic en el problema: va al momento del choque.
+    hit = view.collisions.contacts[0]
+    view.set_time(hit.time_s)
+    assert view.collisions.state_at(view._t) == {0: "choque"}
+
+
+def test_clear_cell_says_so_and_settings_drive_the_check(app, tmp_path):
+    reports = []
+    view = _table_view(app, tmp_path, reports, top=600.0)
+    view.simulate()
+    assert view.collisions.contacts == []
+    assert "sin choques (margen 20 mm)" in view.summary.text()
+    # Margen grande: ahora la mesa está "cerca". Cambiarlo deja el resultado viejo.
+    view.margin_spin.setValue(200)
+    assert view.stale
+    view.simulate()
+    assert view.collisions.near_misses >= 1 and view.collisions.collisions == 0
+    # Sin buscar choques no hay reporte.
+    view.collisions_check.setChecked(False)
+    view.simulate()
+    assert view.collisions is None and "choques sin revisar" in view.summary.text()
+
+
+def test_moving_a_piece_marks_the_result_stale(app, tmp_path):
+    view = _table_view(app, tmp_path, [], top=600.0)
+    view.simulate()
+    assert not view.stale
+    view.objects_table.item(0, 1).setText("1300")
+    assert view.stale
+
+
+def test_workpiece_column_and_tool_mesh(app, tmp_path):
+    from gui.sim_view import WORKPIECE_COLUMN
+    from PySide6.QtCore import Qt
+
+    reports = []
+    view = _table_view(app, tmp_path, reports, top=680.0)
+    torch = tmp_path / "antorcha.stl"
+    write_stl(cylinder((0, 0, 0), (0, 0, 30), 12), torch)
+    assert view.set_tool_mesh(torch)
+    assert view.tool_mesh_label.text() == "antorcha.stl"
+    view.simulate()
+    assert any("herramienta" in c.parts and not c.colliding for c in view.collisions.contacts)
+
+    view.objects_table.item(0, WORKPIECE_COLUMN).setCheckState(Qt.CheckState.Checked)
+    assert view.layout_data.objects[0].workpiece and view.stale
+    view.simulate()
+    assert not any("herramienta" in c.parts for c in view.collisions.contacts)
+
+    assert view.set_tool_mount("0; 0; 10; 0; 0; 0")
+    assert view.layout_data.tool_mount == [0, 0, 10, 0, 0, 0]
+    assert not view.set_tool_mount("1, 2, 3")
+    assert view.layout_data.tool_mount == [0, 0, 10, 0, 0, 0]
+    assert any("Montaje" in m for _s, m in reports)
+    assert view.set_tool_mesh("")
+    assert view.layout_data.tool_mesh == ""
+
+
+def test_collision_settings_travel_with_the_cell(app, tmp_path):
+    view = _table_view(app, tmp_path, [], top=600.0)
+    torch = tmp_path / "antorcha.stl"
+    write_stl(cylinder((0, 0, 0), (0, 0, 30), 12), torch)
+    view.set_tool_mesh(torch)
+    view.set_tool_mount("0, 0, 5, 0, 0, 90")
+    view.margin_spin.setValue(45)
+    path = tmp_path / "celda.layout.json"
+    view.save_layout(path)
+
+    other = _view(app, "")
+    assert other.load_layout(path)
+    assert other.margin_spin.value() == 45
+    assert other.layout_data.tool_mesh == str(torch)
+    assert other.tool_mount_edit.text() == "0, 0, 5, 0, 0, 90"
+    assert other.collisions_check.isChecked()
+
+
+def test_missing_piece_file_does_not_stop_the_collision_check(app, tmp_path):
+    reports = []
+    view = _table_view(app, tmp_path, reports)
+    view.layout_data.objects.append(LayoutObject("fantasma", str(tmp_path / "no.stl")))
+    result = view.simulate()
+    assert result is not None and view.collisions is not None
+    assert any(s == "warning" and "«fantasma» no se revisa" in m for s, m in reports)

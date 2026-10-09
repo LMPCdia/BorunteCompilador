@@ -28,11 +28,18 @@ from sim.pad_sim import SimResult
 LINK_NAMES = ["base", "J1", "J2", "J3", "J4", "J5", "J6"]
 
 
-def robot_link_meshes(model: RobotModel) -> list[Mesh]:
+def robot_link_meshes(model: RobotModel, tool_axis: bool = True) -> list[Mesh]:
+    """`tool_axis`: dibujar el eje de la herramienta en la brida (una ayuda
+    visual: para los choques no cuenta)."""
     files = _mesh_files(model)
     if files:
         return [load_mesh(f) for f in files]
-    return _simple_links(model)
+    return _simple_links(model, tool_axis)
+
+
+def has_real_meshes(model: RobotModel) -> bool:
+    """¿El modelo trae las mallas del fabricante? Si no, el robot son cilindros."""
+    return _mesh_files(model) is not None
 
 
 def _mesh_files(model: RobotModel) -> list[Path] | None:
@@ -45,11 +52,14 @@ def _mesh_files(model: RobotModel) -> list[Path] | None:
     return files if all(f.exists() for f in files) else None
 
 
-def _simple_links(m: RobotModel) -> list[Mesh]:
+def _simple_links(m: RobotModel, tool_axis: bool = True) -> list[Mesh]:
     z2, z3 = m.d1, m.d1 + m.a2
     zw, xw = z3 + m.a3, m.a1 + m.d4
     x4 = m.a1 + m.d4 * 0.35  # dónde empieza la parte del antebrazo que gira con J4
     base_h = m.d1 * 0.55
+    flange = cylinder((xw, 0, zw), (xw + m.d6, 0, zw), 38)
+    if tool_axis:
+        flange.extend(cylinder((xw + m.d6, 0, zw), (xw + m.d6 + 60, 0, zw), 6))
     return [
         cylinder((0, 0, 0), (0, 0, base_h), 160).extend(box((0, 0, 15), (350, 350, 30))),
         cylinder((0, 0, base_h), (0, 0, z2), 130)
@@ -61,8 +71,7 @@ def _simple_links(m: RobotModel) -> list[Mesh]:
         .extend(cylinder((m.a1, 0, zw), (x4, 0, zw), 70)),
         cylinder((x4, 0, zw), (xw - 40, 0, zw), 55),
         cylinder((xw, -55, zw), (xw, 55, zw), 50),
-        cylinder((xw, 0, zw), (xw + m.d6, 0, zw), 38)
-        .extend(cylinder((xw + m.d6, 0, zw), (xw + m.d6 + 60, 0, zw), 6)),  # eje de la herramienta
+        flange,
     ]
 
 
@@ -78,22 +87,35 @@ class LayoutObject:
     z: float = 0.0
     rz: float = 0.0           # grados alrededor del eje vertical
     color: str = "#9aa4ad"
+    # La herramienta trabaja sobre esta pieza (p. ej. la que se suelda): para la
+    # herramienta solo cuenta tocarla, no acercarse. El brazo usa el margen igual.
+    workpiece: bool = False
 
 
 @dataclass
 class Layout:
-    """La celda: modelo de robot, piezas importadas, y las herramientas y
-    sistemas de coordenadas del pad (número -> X, Y, Z, U, V, W)."""
+    """La celda: modelo de robot, piezas importadas, las herramientas y
+    sistemas de coordenadas del pad (número -> X, Y, Z, U, V, W), y lo que hace
+    falta para buscar choques: la herramienta física montada en la brida (su
+    modelo 3D en coordenadas de la brida, y cómo está montada) y el margen."""
 
     model: str = "BRTIRUS1820A"
     objects: list[LayoutObject] = field(default_factory=list)
     tools: dict[int, list[float]] = field(default_factory=dict)
     frames: dict[int, list[float]] = field(default_factory=dict)
+    tool_mesh: str = ""                       # STEP/STL/OBJ de la antorcha, pinza, etc.
+    tool_mount: list[float] = field(default_factory=lambda: [0.0] * 6)
+    margin_mm: float = 20.0
+    collisions: bool = True                   # buscar choques al simular
 
     def save(self, path: str | Path) -> None:
         path = Path(path)
         data = {
             "model": self.model,
+            "collisions": self.collisions,
+            "margin_mm": self.margin_mm,
+            "tool_mesh": _relative(self.tool_mesh, path) if self.tool_mesh else "",
+            "tool_mount": list(self.tool_mount),
             # Claves como texto: JSON no tiene claves numéricas.
             "tools": {str(k): list(v) for k, v in sorted(self.tools.items())},
             "frames": {str(k): list(v) for k, v in sorted(self.frames.items())},
@@ -101,13 +123,7 @@ class Layout:
         }
         for obj in self.objects:
             item = asdict(obj)
-            # Rutas relativas al layout, para poder mover la carpeta entera.
-            try:
-                # relpath y no relative_to: también sirve con piezas en una carpeta
-                # hermana ("../piezas/mesa.stl"). Falla entre unidades de Windows.
-                item["path"] = os.path.relpath(Path(obj.path).resolve(), path.resolve().parent)
-            except ValueError:
-                pass
+            item["path"] = _relative(obj.path, path)
             data["objects"].append(item)
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -130,8 +146,29 @@ class Layout:
                 out[int(k)] = values
             return out
 
+        mount = [float(x) for x in data.get("tool_mount", [0.0] * 6)]
+        if len(mount) != 6 or not all(math.isfinite(x) for x in mount):
+            raise ValueError("tool_mount: hacen falta 6 números (X, Y, Z, U, V, W)")
+        margin = float(data.get("margin_mm", 20.0))
+        if not (math.isfinite(margin) and 0 <= margin <= 1000):
+            raise ValueError("margin_mm: tiene que ser un número entre 0 y 1000")
+        tool_mesh = data.get("tool_mesh") or ""
+        if tool_mesh and not Path(tool_mesh).is_absolute():
+            tool_mesh = str(path.parent / tool_mesh)
         return cls(model=data.get("model", "BRTIRUS1820A"), objects=objects,
-                   tools=poses("tools"), frames=poses("frames"))
+                   tools=poses("tools"), frames=poses("frames"), tool_mesh=tool_mesh,
+                   tool_mount=mount, margin_mm=margin,
+                   collisions=bool(data.get("collisions", True)))
+
+
+def _relative(file: str, layout_path: Path) -> str:
+    """Ruta relativa al layout, para poder mover la carpeta entera. relpath y no
+    relative_to: también sirve con piezas en una carpeta hermana
+    ("../piezas/mesa.stl"). Entre unidades de Windows no se puede: queda absoluta."""
+    try:
+        return os.path.relpath(Path(file).resolve(), layout_path.resolve().parent)
+    except ValueError:
+        return file
 
 
 # --- línea de tiempo -----------------------------------------------------------------

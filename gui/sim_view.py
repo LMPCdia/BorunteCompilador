@@ -13,7 +13,8 @@ Reglas que salieron de probarla como usuario:
 - La simulación nunca cuelga la interfaz: tiene presupuesto, detecta bucles y
   se puede cancelar.
 - Si cambia algo que la simulación usó (modelo, herramientas, coordenadas,
-  programa), el resultado se marca desactualizado.
+  programa, piezas y margen si se buscan choques), el resultado se marca
+  desactualizado.
 """
 
 from __future__ import annotations
@@ -28,10 +29,12 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QPushButton,
@@ -49,14 +52,16 @@ from compiler.codegen import CompileError
 from compiler.pad_codegen import MAX_TOOL_OR_COORD, PadOptions, compile_to_pad_report, io_point
 from pad.backup import PadBackup
 from pad.listing import io_name
+from sim import collision
 from sim.kinematics import RobotModel, identity, pose_matrix, rot_axis
 from sim.meshes import Mesh, MeshError, load_mesh
 from sim.pad_sim import Cancelled, PadSimulator, SimResult, inputs_used
-from sim.scene import Layout, LayoutObject, Timeline, robot_link_meshes
+from sim.scene import Layout, LayoutObject, Timeline, has_real_meshes, robot_link_meshes
 
 SLIDER_STEPS = 1000
 FRAME_MS = 33
-OBJECT_COLUMNS = ["Pieza", "X", "Y", "Z", "Giro Z°"]
+OBJECT_COLUMNS = ["Pieza", "X", "Y", "Z", "Giro Z°", "Se trabaja"]
+WORKPIECE_COLUMN = 5
 POSE_COLUMNS = ["N°", "X", "Y", "Z", "U", "V", "W"]
 DEFAULT_MODEL = "BRTIRUS1820A"
 IMPORT_AT = (1200.0, 0.0)      # dónde aparece una pieza importada (frente al robot)
@@ -66,6 +71,8 @@ COLOR_MOVEL = (1.0, 0.85, 0.2)
 COLOR_OUTPUT_ON = (1.0, 0.45, 0.1)   # MOVEL con alguna salida prendida (p. ej. soldando)
 COLOR_FAILED = (1.0, 0.15, 0.15)
 INVALID_BRUSH = QBrush(QColor(220, 60, 60, 110))
+COLOR_HIT = "#e02828"     # pieza contra la que el robot choca en este momento
+COLOR_NEAR = "#f0a020"    # pieza más cerca que el margen
 
 Reporter = Callable[[str, str], None]  # (severidad "info"|"warning"|"error", mensaje)
 
@@ -73,6 +80,14 @@ Reporter = Callable[[str, str], None]  # (severidad "info"|"warning"|"error", me
 def object_matrix(obj: LayoutObject):
     r = rot_axis((0, 0, 1), math.radians(obj.rz))
     return [r[0] + [obj.x], r[1] + [obj.y], r[2] + [obj.z], [0.0, 0.0, 0.0, 1.0]]
+
+
+def parse_pose(text: str) -> list[float]:
+    """'0, 0, 120, 0, 0, 0' -> 6 números (acepta ';' o espacios entre medio)."""
+    items = [x for x in text.replace(";", " ").replace(",", " ").split() if x]
+    if len(items) != 6:
+        raise ValueError(f"hacen falta 6 números (X, Y, Z, U, V, W) y hay {len(items)}")
+    return [_number(x) for x in items]
 
 
 def parse_inputs(text: str) -> dict[int, bool]:
@@ -215,6 +230,8 @@ class SimView(QWidget):
         self.backup: PadBackup | None = None      # respaldo abierto (None = editor)
         self.backup_path: Path | None = None
         self.result: SimResult | None = None
+        self.collisions: collision.CollisionReport | None = None
+        self._painted: dict[int, str] = {}  # pieza -> color que se le puso por choque
         self.timeline: Timeline | None = None
         self.stale = False
         self.current_q: list[float] = [0.0] * 6
@@ -413,6 +430,7 @@ class SimView(QWidget):
         tabs = QTabWidget()
         tabs.addTab(issues, "Problemas")
         tabs.addTab(objects, "Piezas")
+        tabs.addTab(self._build_collisions(), "Choques")
         tabs.addTab(self.tools_table, "Herramientas")
         tabs.addTab(self.frames_table, "Coordenadas")
         self.side_tabs = tabs
@@ -431,6 +449,66 @@ class SimView(QWidget):
         side_layout.addLayout(row2)
         return side
 
+    def _build_collisions(self) -> QWidget:
+        self.collisions_check = QCheckBox("Buscar choques al simular")
+        self.collisions_check.setChecked(collision.available())
+        self.collisions_check.setEnabled(collision.available())
+        if not collision.available():
+            self.collisions_check.setToolTip("Falta python-fcl en esta instalación")
+        self.collisions_check.toggled.connect(self._on_collision_settings)
+        self.margin_spin = QDoubleSpinBox()
+        self.margin_spin.setRange(0.0, 500.0)
+        self.margin_spin.setDecimals(0)
+        self.margin_spin.setSuffix(" mm")
+        self.margin_spin.setValue(self.layout_data.margin_mm)
+        self.margin_spin.valueChanged.connect(self._on_collision_settings)
+        self.tool_mesh_label = QLabel()
+        self.tool_mesh_label.setWordWrap(True)
+        choose = QPushButton("Elegir modelo 3D…")
+        choose.clicked.connect(self._on_choose_tool_mesh)
+        self.remove_tool_mesh_btn = QPushButton("Quitar")
+        self.remove_tool_mesh_btn.clicked.connect(lambda: self.set_tool_mesh(""))
+        self.tool_mount_edit = QLineEdit()
+        self.tool_mount_edit.setPlaceholderText("0, 0, 0, 0, 0, 0")
+        self.tool_mount_edit.setToolTip("Dónde queda el origen del CAD de la herramienta respecto "
+                                        "de la brida: X, Y, Z en mm y U, V, W en grados. Z sale "
+                                        "de la brida.")
+        self.tool_mount_edit.editingFinished.connect(self._on_tool_mount_edited)
+
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.addWidget(self.collisions_check)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Margen de seguridad:"))
+        row.addWidget(self.margin_spin)
+        row.addStretch(1)
+        lay.addLayout(row)
+        lay.addWidget(QLabel("<b>Herramienta montada en la brida</b> (antorcha, pinza…):"))
+        lay.addWidget(self.tool_mesh_label)
+        row = QHBoxLayout()
+        row.addWidget(choose)
+        row.addWidget(self.remove_tool_mesh_btn)
+        row.addStretch(1)
+        lay.addLayout(row)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Montaje:"))
+        row.addWidget(self.tool_mount_edit, 1)
+        lay.addLayout(row)
+        note = QLabel(
+            "Las piezas cuentan como sólidos. Se revisa el brazo y la herramienta contra las "
+            "piezas, contra el piso (debajo de la base) y contra el mismo brazo, sin saltear "
+            "nada entre muestras. Más cerca que el margen es un aviso; tocarse, un error.<br>"
+            "En la pieza que se suelda o se agarra tildá <i>Se trabaja</i> (pestaña Piezas): "
+            "para la herramienta solo cuenta tocarla. El brazo sí usa el margen.<br>"
+            "<i>Mientras no estén las mallas del fabricante, el robot son cilindros "
+            "aproximados: los choques son estimaciones.</i>")
+        note.setWordWrap(True)
+        note.setTextFormat(Qt.TextFormat.RichText)
+        lay.addWidget(note)
+        lay.addStretch(1)
+        self._show_tool_mesh()
+        return box
+
     # -- modelo -----------------------------------------------------------------------
 
     def _select_initial_model(self) -> None:
@@ -448,7 +526,7 @@ class SimView(QWidget):
     def set_model(self, name: str) -> bool:
         try:
             model = RobotModel.load(name)
-            meshes = robot_link_meshes(model) if self.viewport is not None else None
+            meshes = self._robot_meshes(model) if self.viewport is not None else None
         except Exception as e:  # noqa: BLE001 — JSON roto, mallas que faltan, etc.
             self._report("error", f"No se pudo cargar el robot {name}: {e}")
             if self.model is not None:
@@ -466,6 +544,26 @@ class SimView(QWidget):
         if previous is not None and previous.name != name:
             self._mark_stale(f"se cambió el robot a {name}")
         return True
+
+    def _robot_meshes(self, model: RobotModel) -> list[Mesh]:
+        """Eslabones para dibujar, con la herramienta pegada a la brida."""
+        meshes = robot_link_meshes(model)
+        tool = self._tool_mesh()
+        if tool is not None:
+            flange = Mesh(list(meshes[6].triangles))
+            meshes[6] = flange.extend(collision.tool_in_flange_zero(
+                model, tool, self.layout_data.tool_mount))
+        return meshes
+
+    def _tool_mesh(self) -> Mesh | None:
+        path = self.layout_data.tool_mesh
+        if not path:
+            return None
+        try:
+            return self._mesh_for(path)
+        except MeshError as e:
+            self._report("error", f"Herramienta: {e}")
+            return None
 
     # -- qué se simula ------------------------------------------------------------------
 
@@ -543,6 +641,8 @@ class SimView(QWidget):
     def _clear_result(self) -> None:
         self.play_btn.setChecked(False)
         self.result = None
+        self.collisions = None
+        self._paint_collisions(None)
         self.timeline = None
         self.stale = False
         self.issues_list.clear()
@@ -590,6 +690,7 @@ class SimView(QWidget):
             simulator = PadSimulator(self.model, self.inputs(), tools=self.layout_data.tools,
                                      frames=self.layout_data.frames, progress=self._progress)
             result = simulator.run(backup)
+            report = self._check_collisions(result)
         except Cancelled:
             self._clear_result()
             self._report("warning", "Simulación cancelada.")
@@ -606,6 +707,10 @@ class SimView(QWidget):
             self.cancel_btn.setVisible(False)
 
         self.result = result
+        self.collisions = report
+        if report is not None:
+            result.issues.extend(report.issues)
+        self._paint_collisions(None)
         self.stale = False
         self.timeline = Timeline(result)
         self._draw_path(simulator)
@@ -613,6 +718,31 @@ class SimView(QWidget):
         self._show_summary(result)
         self.set_time(0.0)
         return result
+
+    def _check_collisions(self, result: SimResult) -> collision.CollisionReport | None:
+        """Choques sobre la trayectoria simulada (None si no se buscan)."""
+        if not self.collisions_check.isChecked() or not collision.available():
+            return None
+        obstacles = []
+        for obj in self.layout_data.objects:
+            try:
+                mesh = self._mesh_for(obj.path)
+            except MeshError as e:
+                self._report("warning", f"Choques: «{obj.name}» no se revisa ({e})")
+                continue
+            obstacles.append(collision.Obstacle(obj.name, mesh, object_matrix(obj), obj.workpiece))
+        try:
+            checker = collision.CollisionChecker(
+                self.model, robot_link_meshes(self.model, tool_axis=False), obstacles,
+                tool_mesh=self._tool_mesh(), tool_mount=self.layout_data.tool_mount,
+                margin_mm=self.layout_data.margin_mm,
+                approximate_robot=not has_real_meshes(self.model))
+            return checker.check(result, progress=self._progress)
+        except Cancelled:
+            raise
+        except Exception as e:  # noqa: BLE001 — la simulación sirve igual sin los choques
+            self._report("error", f"No se pudieron revisar los choques: {e!r}")
+            return None
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         """Mientras simula, nada de lo que la simulación usa se puede cambiar
@@ -682,6 +812,19 @@ class SimView(QWidget):
         parts.append(f"tiempo de ciclo estimado {result.total_time_s:.1f} s{time_note}{cycle}, "
                      f"sin aceleraciones")
         parts.append(f"{errors} error(es), {warnings} aviso(s)")
+        report = self.collisions
+        if report is not None:
+            if report.collisions:
+                parts.append(f"<b style='color:#d04040'>💥 {report.collisions} choque(s)</b>")
+            if report.near_misses:
+                parts.append(f"{report.near_misses} paso(s) a menos de "
+                             f"{self.layout_data.margin_mm:g} mm")
+            if not report.contacts:
+                parts.append(f"sin choques (margen {self.layout_data.margin_mm:g} mm)")
+        elif not collision.available():
+            parts.append("choques sin revisar (falta python-fcl)")
+        else:
+            parts.append("choques sin revisar")
         if not result.complete:
             parts.append("<b>simulación cortada (ver Problemas)</b>")
         missing = []
@@ -774,11 +917,25 @@ class SimView(QWidget):
         self._t = max(0.0, min(t, self.timeline.duration))
         q, where = self.timeline.at(self._t)
         self.show_pose(q)
+        self._paint_collisions(self.collisions.state_at(self._t) if self.collisions else None)
         self.time_label.setText(f"{self._t:6.1f} / {self.timeline.duration:.1f} s  {where}")
         if self.timeline.duration > 0:
             self.slider.blockSignals(True)
             self.slider.setValue(round(self._t / self.timeline.duration * SLIDER_STEPS))
             self.slider.blockSignals(False)
+
+    def _paint_collisions(self, state: dict[int, str] | None) -> None:
+        """Pinta de rojo (choca) o naranja (cerca) las piezas en este instante."""
+        state = state or {}
+        if self.viewport is None or state == self._painted:
+            return
+        for i, obj in enumerate(self.layout_data.objects):
+            index = self._object_index.get(i)
+            if index is None or state.get(i) == self._painted.get(i):
+                continue
+            color = {"choque": COLOR_HIT, "cerca": COLOR_NEAR}.get(state.get(i), obj.color)
+            self.viewport.set_object_color(index, color)
+        self._painted = dict(state)
 
     def show_pose(self, q: list[float]) -> None:
         self.current_q = list(q)
@@ -863,6 +1020,7 @@ class SimView(QWidget):
                            z=round(-zmin, 1) or 0.0)
         self.layout_data.objects.append(obj)
         self._refresh_objects(rebuild=True)
+        self._mark_collisions_stale("se agregó una pieza")
         self._report("info", f"Importado {Path(path).name} ({len(mesh)} triángulos).")
         return obj
 
@@ -884,6 +1042,10 @@ class SimView(QWidget):
         self.frames_table.set_values(layout.frames)
         self.layout_data.tools = self.tools_table.values()     # la tabla manda
         self.layout_data.frames = self.frames_table.values()
+        self._show_collision_settings()
+        if self.viewport is not None and self.model is not None:
+            self.viewport.set_robot(self._robot_meshes(self.model))  # con su herramienta
+            self.show_pose(self.current_q)
         if self.viewport is None:  # con vista 3D, el aviso sale al cargar la malla
             for obj in layout.objects:
                 if not Path(obj.path).exists():
@@ -916,12 +1078,20 @@ class SimView(QWidget):
             values = [obj.name, _fmt(obj.x), _fmt(obj.y), _fmt(obj.z), _fmt(obj.rz)]
             for col, value in enumerate(values):
                 self.objects_table.setItem(row, col, QTableWidgetItem(value))
+            check = QTableWidgetItem()
+            check.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled
+                           | Qt.ItemFlag.ItemIsSelectable)
+            check.setCheckState(Qt.CheckState.Checked if obj.workpiece else Qt.CheckState.Unchecked)
+            check.setToolTip("La herramienta trabaja sobre esta pieza: para la herramienta solo "
+                             "cuenta tocarla, no acercarse")
+            self.objects_table.setItem(row, WORKPIECE_COLUMN, check)
         self._updating_table = False
         if self.viewport is None:
             return
         if rebuild or self.viewport.object_count() != len(self.layout_data.objects):
             self.viewport.clear_objects()
             self._object_index: dict[int, int] = {}
+            self._painted = {}
             for i, obj in enumerate(self.layout_data.objects):
                 try:
                     self._object_index[i] = self.viewport.add_object(self._mesh_for(obj.path), obj.color)
@@ -936,6 +1106,10 @@ class SimView(QWidget):
         if self._updating_table:
             return
         obj = self.layout_data.objects[item.row()]
+        if item.column() == WORKPIECE_COLUMN:
+            obj.workpiece = item.checkState() == Qt.CheckState.Checked
+            self._mark_collisions_stale("cambió qué pieza se trabaja")
+            return
         field = ["name", "x", "y", "z", "rz"][item.column()]
         if field == "name":
             obj.name = item.text()
@@ -945,6 +1119,82 @@ class SimView(QWidget):
         except ValueError:
             self._report("warning", f"«{item.text()}» no es un número")
         self._refresh_objects(rebuild=False)
+        self._mark_collisions_stale("se movió una pieza")
+
+    # -- choques -----------------------------------------------------------------------------
+
+    def _show_collision_settings(self) -> None:
+        """Lleva a los controles lo que dice la celda (al abrir una)."""
+        for widget in (self.collisions_check, self.margin_spin):
+            widget.blockSignals(True)
+        self.collisions_check.setChecked(self.layout_data.collisions and collision.available())
+        self.margin_spin.setValue(self.layout_data.margin_mm)
+        for widget in (self.collisions_check, self.margin_spin):
+            widget.blockSignals(False)
+        self._show_tool_mesh()
+
+    def _show_tool_mesh(self) -> None:
+        path = self.layout_data.tool_mesh
+        self.tool_mesh_label.setText(
+            Path(path).name if path else "Ninguna: se revisa hasta la brida. Cargá el STEP de la "
+                                         "antorcha en coordenadas de la brida.")
+        self.remove_tool_mesh_btn.setEnabled(bool(path))
+        self.tool_mount_edit.setText(", ".join(_fmt(v) for v in self.layout_data.tool_mount))
+
+    def _on_collision_settings(self, *_args) -> None:
+        if collision.available():
+            self.layout_data.collisions = self.collisions_check.isChecked()
+        self.layout_data.margin_mm = float(self.margin_spin.value())
+        self._mark_stale("cambió la búsqueda de choques")
+
+    def _mark_collisions_stale(self, reason: str) -> None:
+        if self.collisions_check.isChecked():
+            self._mark_stale(reason)
+
+    def set_tool_mesh(self, path: str | Path) -> bool:
+        """Modelo 3D de la herramienta física, en coordenadas de la brida ("" = ninguna)."""
+        path = str(path) if path else ""
+        if path:
+            try:
+                self._mesh_for(path)
+            except MeshError as e:
+                self._report("error", f"Herramienta: {e}")
+                return False
+        self.layout_data.tool_mesh = path
+        self._show_tool_mesh()
+        if self.viewport is not None and self.model is not None:
+            self.viewport.set_robot(self._robot_meshes(self.model))
+            self.show_pose(self.current_q)
+        self._mark_collisions_stale("cambió la herramienta montada")
+        return True
+
+    def set_tool_mount(self, text: str) -> bool:
+        try:
+            mount = parse_pose(text)
+        except ValueError as e:
+            self._report("warning", f"Montaje de la herramienta: {e}")
+            self._show_tool_mesh()
+            return False
+        if mount == self.layout_data.tool_mount:
+            return True
+        self.layout_data.tool_mount = mount
+        self._show_tool_mesh()
+        if self.layout_data.tool_mesh:
+            if self.viewport is not None and self.model is not None:
+                self.viewport.set_robot(self._robot_meshes(self.model))
+                self.show_pose(self.current_q)
+            self._mark_collisions_stale("cambió el montaje de la herramienta")
+        return True
+
+    def _on_tool_mount_edited(self) -> None:
+        self.set_tool_mount(self.tool_mount_edit.text())
+
+    def _on_choose_tool_mesh(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Modelo 3D de la herramienta (en coordenadas de la brida)",
+            filter="Modelos 3D (*.step *.stp *.stl *.obj)")
+        if path:
+            self.set_tool_mesh(path)
 
     # -- diálogos -------------------------------------------------------------------------
 
@@ -967,6 +1217,7 @@ class SimView(QWidget):
             self.objects_table.clearSelection()
             self.objects_table.setCurrentCell(-1, -1)
             self._refresh_objects(rebuild=True)
+            self._mark_collisions_stale("se quitó una pieza")
 
     def _on_open_layout(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Abrir celda", filter="Celda (*.layout.json *.json)")

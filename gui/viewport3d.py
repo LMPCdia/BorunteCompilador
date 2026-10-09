@@ -50,11 +50,13 @@ class _Node:
         self.entity = entity
         self.transform = transform
         self.refs = refs  # componentes que Qt3D usa por debajo: viven con la entidad
+        self.material = None
 
     def remove(self) -> None:
         self.entity.setParent(None)
         self.entity.deleteLater()
         self.refs = []
+        self.material = None
 
 
 class Viewport3D:
@@ -160,9 +162,11 @@ class Viewport3D:
         # "quema" una mancha blanca donde refleja la luz.
         material.setSpecular(QColor("#000000" if matte else "#202020"))
         material.setShininess(80)
-        return self._geometry_node(
+        node = self._geometry_node(
             mesh.interleaved(), len(mesh) * 3, self._core.QAttribute.defaultNormalAttributeName(),
             self._render.QGeometryRenderer.PrimitiveType.Triangles, material)
+        node.material = material
+        return node
 
     def _lines_node(self, points, colors, strip: bool) -> _Node:
         data = bytearray()
@@ -234,6 +238,12 @@ class Viewport3D:
 
     def place_object(self, index: int, matrix: Matrix) -> None:
         self._objects[index].transform.setMatrix(_qmatrix(matrix))
+
+    def set_object_color(self, index: int, color: str) -> None:
+        """Para marcar en vivo una pieza contra la que el robot choca."""
+        material = self._objects[index].material
+        material.setDiffuse(QColor(color))
+        material.setAmbient(QColor(color).darker(250))
 
     def object_count(self) -> int:
         return len(self._objects)

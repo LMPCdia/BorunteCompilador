@@ -4,5 +4,8 @@ PySide6>=6.6
 # Lector de STEP para el layout del simulador 3D (trae OpenCascade adentro;
 # suma ~90 MB al .exe). Ver sim/meshes.py.
 gmsh>=4.11
+# Choques del robot contra las piezas de la celda (FCL compilada; trae numpy).
+# Ver sim/collision.py. Sin ella el simulador anda igual, sin buscar choques.
+python-fcl>=0.7
 pytest>=8.0
 pytest-qt>=4.4  # opcional, no usado todavía pero útil si se amplían los tests de GUI

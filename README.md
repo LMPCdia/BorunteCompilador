@@ -24,8 +24,9 @@ Leer primero `docs/ARCHITECTURE.md` y `docs/PAD_FORMAT.md`.
 - [x] **Simulador 3D** (`sim/`, pestaña "Simulación 3D"): ejecuta el respaldo
       del pad sobre el modelo del robot, avisa ejes fuera de rango, puntos
       inalcanzables y singularidades, estima el tiempo de ciclo, y arma el
-      layout importando STEP/STL/OBJ. Modelo cargado: BRTIRUS1820A. Ver
-      `docs/SIMULATOR.md`
+      layout importando STEP/STL/OBJ. Busca **choques** del brazo y la
+      herramienta contra las piezas (sólidos), el piso y el propio brazo
+      (python-fcl). Modelo cargado: BRTIRUS1820A. Ver `docs/SIMULATOR.md`
 - [x] Ejecutable de Windows de un solo archivo, construido en GitHub Actions
 - [ ] **Probar en el pad** un respaldo generado (nadie lo hizo todavía)
 - [ ] Espera de entrada, `ELSE` y variables en el pad (falta un ejemplo del
