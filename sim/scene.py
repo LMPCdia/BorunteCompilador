@@ -23,7 +23,9 @@ from pathlib import Path
 
 from sim.kinematics import RobotModel, model_path
 from sim.meshes import Mesh, box, cylinder, load_mesh
-from sim.pad_sim import SimResult
+from sim.pad_sim import Segment, SimResult, untrapezoid
+
+RAMP_STEP_S = 0.01  # muestras extra en el arranque y el frenado (ver _with_ramps)
 
 LINK_NAMES = ["base", "J1", "J2", "J3", "J4", "J5", "J6"]
 
@@ -183,27 +185,43 @@ class Timeline:
         self.times: list[float] = [0.0]
         self.poses: list[list[float]] = [list(start)]
         self.labels: list[str] = [""]
+        self.tools: list[int] = [0]  # herramienta activa (para la punta)
         t = 0.0
         for seg in result.segments:
             label = f"{seg.where} {seg.name}".strip()
             if seg.kind == "WAIT" or len(seg.samples) < 2:
                 # Quieto todo el tramo: primero ubicarse, después esperar.
-                self._append(t, seg.samples[-1], label)
+                self._append(t, seg.samples[-1], label, seg.tool)
                 t += max(0.0, seg.duration_s)
-                self._append(t, seg.samples[-1], label)
+                self._append(t, seg.samples[-1], label, seg.tool)
                 continue
             # Cada muestra en su tiempo real (cerca de una singularidad los
             # tramos chicos en el espacio pueden ser largos en el tiempo).
             times = seg.times if len(seg.times) == len(seg.samples) else [
                 seg.duration_s * i / (len(seg.samples) - 1) for i in range(len(seg.samples))]
-            for q, dt in zip(seg.samples, times):
-                self._append(t + dt, q, label)
+            for dt, q in _with_ramps(seg, times):
+                self._append(t + dt, q, label, seg.tool)
             t += seg.duration_s
 
-    def _append(self, t: float, q: list[float], where: str) -> None:
+    def _append(self, t: float, q: list[float], where: str, tool: int = 0) -> None:
         self.times.append(t)
         self.poses.append(list(q))
         self.labels.append(where)
+        self.tools.append(tool)
+
+    def jumps(self) -> list[float]:
+        """Instantes en que el robot "salta" sin moverse (el simulador se
+        recuperó de un movimiento imposible): ahí no hay velocidad que medir."""
+        out = []
+        for i in range(1, len(self.times)):
+            if self.times[i] == self.times[i - 1] and any(
+                    abs(a - b) > 1e-6 for a, b in zip(self.poses[i], self.poses[i - 1])):
+                out.append(self.times[i])
+        return out
+
+    def tool_at(self, t: float) -> int:
+        i = min(max(1, bisect.bisect_right(self.times, t)), len(self.times) - 1)
+        return self.tools[i]
 
     @property
     def duration(self) -> float:
@@ -220,3 +238,28 @@ class Timeline:
         f = 0.0 if t1 == t0 else (t - t0) / (t1 - t0)
         q = [a + (b - a) * f for a, b in zip(self.poses[i - 1], self.poses[i])]
         return q, self.labels[i]
+
+
+def _with_ramps(seg: Segment, times: list[float]) -> list[tuple[float, list[float]]]:
+    """(tiempo, ángulos) del tramo. Con perfil de aceleración, entre dos
+    muestras el robot NO va a velocidad pareja (está acelerando), así que se
+    agregan puntos cada RAMP_STEP_S en el arranque y el frenado, ubicados con
+    el perfil exacto. Sin eso, la velocidad y la aceleración que se derivan de
+    la animación salen con escalones que el robot no tiene."""
+    points = list(zip(times, seg.samples))
+    a, total = seg.accel_s, seg.duration_s
+    if a <= 0 or total <= 0 or len(times) < 2:
+        return points
+    nominal = [untrapezoid(x, total, a) for x in times]
+    ramp = min(a, total / 2)
+    extra = [i * RAMP_STEP_S for i in range(1, int(ramp / RAMP_STEP_S) + 1)]
+    extra += [total - x for x in extra]
+    for tau in extra:
+        u = untrapezoid(tau, total, a)
+        i = min(max(1, bisect.bisect_right(nominal, u)), len(nominal) - 1)
+        u0, u1 = nominal[i - 1], nominal[i]
+        f = 0.0 if u1 == u0 else (u - u0) / (u1 - u0)
+        q0, q1 = seg.samples[i - 1], seg.samples[i]
+        points.append((tau, [x + (y - x) * f for x, y in zip(q0, q1)]))
+    points.sort(key=lambda p: p[0])
+    return points

@@ -334,6 +334,14 @@ class MainWindow(QMainWindow):
         m_robot = bar.addMenu("&Robot")
         m_robot.addAction(self.act_digitize)
 
+        m_sim = bar.addMenu("&Simulación")
+        act = m_sim.addAction("Simular")
+        act.setShortcut("F6")
+        act.triggered.connect(lambda: (self.tabs.setCurrentWidget(self.sim_tab), self.sim_view.simulate()))
+        act = m_sim.addAction("Gráficas de movimiento…")
+        act.setShortcut("Ctrl+G")
+        act.triggered.connect(self.sim_view.show_charts)
+
         # El menú Ventana se arma con los toggles que ya trae cada dock.
         self.menu_window = bar.addMenu("&Ventana")
         for key in ("estructura", "campos", "propiedades", "conexion", "mensajes", "log"):

@@ -31,6 +31,30 @@ Los STEP se convierten a triángulos con **gmsh** (dependencia nueva, trae
 OpenCascade; suma ~60 MB al `.exe`). La malla es gruesa a propósito: alcanza
 para ver la celda, no para medir.
 
+## Gráficas de movimiento (`sim/motion.py`, `gui/motion_charts.py`)
+
+Botón **Gráficas…** (o *Simulación → Gráficas de movimiento*, Ctrl+G):
+
+- por eje: posición (°), velocidad (°/s) y aceleración (°/s²);
+- de la punta de la herramienta: velocidad y aceleración lineal (mm/s, mm/s²);
+- tabla con el recorrido, la velocidad máxima de cada eje (y qué % de su
+  límite es) y la aceleración máxima;
+- franjas rojas donde hay choque y naranjas donde pasa más cerca que el margen;
+- una línea sigue a la animación, y un clic en la gráfica lleva la animación ahí.
+- Clic en la leyenda: muestra/oculta un eje.
+
+**Aceleración (hipótesis).** El respaldo del pad trae `speed` y `smooth`
+pero no la aceleración del controlador. El simulador usa un perfil
+trapezoidal: cada movimiento tarda **Aceleración** segundos (0.25 s por
+defecto, campo al lado de la barra de tiempo) en llegar a su velocidad y lo
+mismo en frenar, arrancando y terminando quieto. Con 0, velocidad constante
+y las aceleraciones no significan nada. Cambia el tiempo de ciclo: +1
+tiempo de aceleración por movimiento. No se simula `smooth` (el robot real
+probablemente redondea las esquinas sin frenar).
+
+Las derivadas son numéricas, con una ventana de 40 ms; no cruzan los
+"saltos" del simulador (recuperaciones), que no son movimiento.
+
 ## Choques (`sim/collision.py`, python-fcl)
 
 Se activa en la pestaña **Choques** (activado por defecto). Después de
@@ -223,4 +247,4 @@ está bien; si no, la diferencia dice qué eje está invertido o desfasado.
   de las casillas (o `--input` en la línea de comandos), fijos toda la
   simulación.
 - Sin velocidad lineal máxima del robot: el tiempo de un MOVEL rápido puede
-  salir corto.
+  salir corto, y la velocidad de la punta en las gráficas, alta.

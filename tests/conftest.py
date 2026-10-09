@@ -4,10 +4,11 @@ import pytest
 from PySide6.QtCore import QSettings
 
 
-@pytest.fixture(autouse=True, scope="session")
+@pytest.fixture(autouse=True)
 def _isolated_settings(tmp_path_factory):
-    # La app recuerda cosas (último modelo de robot) con QSettings: que los
-    # tests no lean ni escriban la configuración real del usuario.
+    # La app recuerda cosas (último modelo de robot, tiempo de aceleración)
+    # con QSettings: que los tests no lean ni escriban la configuración real
+    # del usuario, ni se pasen lo que recordó un test al siguiente.
     QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope,
                       str(tmp_path_factory.mktemp("settings")))
 

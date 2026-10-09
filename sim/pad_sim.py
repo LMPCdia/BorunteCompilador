@@ -24,6 +24,14 @@ docs/SIMULATOR.md):
   destino (si se encuentra una configuración que llegue); si no, los MOVEL
   siguientes quedan sin evaluar hasta el próximo MOVEJ, en vez de dar una
   cascada de errores falsos.
+- Perfil de velocidad: con `accel_s` = 0 cada movimiento va a velocidad
+  constante de punta a punta (sin aceleraciones). Con `accel_s` > 0 cada
+  movimiento arranca y termina quieto con un perfil trapezoidal: tarda
+  `accel_s` en llegar a la velocidad del tramo y otro tanto en frenar. El
+  tiempo real de aceleración del controlador NO se conoce (el respaldo solo
+  trae `speed` y `smooth`): es una hipótesis configurable. `smooth`
+  (redondeo de esquinas, probablemente) no se simula: el robot real puede
+  no detenerse entre movimientos.
 - Las entradas son fijas y el pad no tiene variables: volver a una etiqueta
   ya visitada (en la misma llamada) es un programa cíclico que se repite para
   siempre. Se simula UN ciclo, que es el tiempo de ciclo, y se informa.
@@ -82,6 +90,7 @@ class Segment:
     tool: int = 0                  # herramienta con la que se dibuja la punta
     times: list[float] = field(default_factory=list)  # tiempo de cada muestra, desde 0
     failed: bool = False           # tramo hasta donde se llegó antes de un error
+    accel_s: float = 0.0           # perfil trapezoidal con el que se calcularon `times`
 
 
 @dataclass
@@ -139,8 +148,10 @@ class PadSimulator:
                  start_deg: list[float] | None = None,
                  tools: dict[int, Pose6] | None = None,
                  frames: dict[int, Pose6] | None = None,
-                 progress: Callable[[int], None] | None = None) -> None:
+                 progress: Callable[[int], None] | None = None,
+                 accel_s: float = 0.0) -> None:
         self.model = model
+        self.accel_s = max(0.0, float(accel_s))
         self.inputs = inputs or {}
         # None = no se sabe dónde está el robot (hasta el primer MOVEJ).
         self.q: list[float] | None = list(start_deg) if start_deg else None
@@ -334,15 +345,18 @@ class PadSimulator:
                 ejes = ", ".join(f"J{i + 1}={target[i]:.1f}°" for i in bad)
                 self._issue("error", where, f"MOVEJ fuera de rango: {ejes}")
             if self.q is None:
-                # Primer MOVEJ: el robot se ubica ahí (no se sabe de dónde viene).
-                r.start_deg = list(target)
+                # Primer MOVEJ (o el primero después de perder la pose): el robot
+                # se ubica ahí. La pose inicial es solo la del primero de todos.
+                if r.start_deg is None:
+                    r.start_deg = list(target)
                 self._add_segment(Segment("MOVEJ", where, [list(target)], 0.0, name,
                                           tool if tool in self.tools else 0, [0.0]))
             else:
                 samples = self._joint_path(self.q, target)
                 times = self._times(samples, speed)
                 self._add_segment(Segment("MOVEJ", where, samples, times[-1], name,
-                                          tool if tool in self.tools else 0, times))
+                                          tool if tool in self.tools else 0, times,
+                                          accel_s=self.accel_s))
             self.q = list(target)
             self._last_known = list(target)
             return
@@ -368,7 +382,8 @@ class PadSimulator:
         target_tcp = mat_mul(self.frames[coord], pose_matrix(*values))
         samples, failed = self._linear_path(target_tcp, self.tools[tool], where)
         times = self._times(samples, speed)
-        self._add_segment(Segment("MOVEL", where, samples, times[-1], name, tool, times, failed))
+        self._add_segment(Segment("MOVEL", where, samples, times[-1], name, tool, times, failed,
+                                  accel_s=self.accel_s))
         if failed:
             r.skipped_moves += 1
             r.failed_moves += 1
@@ -476,13 +491,65 @@ class PadSimulator:
         times = [0.0]
         for s0, s1 in zip(samples, samples[1:]):
             times.append(times[-1] + max(abs(b - a) / v for a, b, v in zip(s0, s1, speeds)))
-        return times
+        return trapezoid(times, self.accel_s)
+
+
+def trapezoid(times: list[float], accel_s: float) -> list[float]:
+    """Tiempos a velocidad constante -> tiempos con arranque y frenado.
+
+    `times` es el tiempo de cada muestra yendo todo el camino a la velocidad
+    del tramo (de 0 a T). Con un perfil trapezoidal que tarda `accel_s` en
+    acelerar de 0 a esa velocidad (y lo mismo en frenar), la muestra que
+    estaba en t pasa a estar en:
+        t < accel/2:          sqrt(2·t·accel)
+        en el medio:          t + accel/2
+        t > T - accel/2:      T + accel - sqrt(2·(T-t)·accel)
+    Si el tramo es tan corto que no llega a la velocidad (T < accel), el
+    perfil es triangular y dura 2·sqrt(T·accel)."""
+    if accel_s <= 0 or len(times) < 2 or times[-1] <= 0:
+        return list(times)
+    total_t, a = times[-1], accel_s
+    if total_t >= a:
+        total = total_t + a
+        half = a / 2
+    else:
+        total = 2 * math.sqrt(total_t * a)
+        half = total_t / 2
+    out = []
+    for t in times:
+        if t <= half:
+            out.append(math.sqrt(2 * t * a))
+        elif t >= total_t - half:
+            out.append(total - math.sqrt(max(0.0, 2 * (total_t - t) * a)))
+        else:
+            out.append(t + a / 2)
+    return out
+
+
+def untrapezoid(tau: float, total: float, accel_s: float) -> float:
+    """Inversa de `trapezoid`: instante real -> tiempo "a velocidad constante"
+    (que es lo que dice cuánto camino se hizo). `total` es la duración real."""
+    a = accel_s
+    if a <= 0 or total <= 0:
+        return tau
+    tau = min(max(tau, 0.0), total)
+    if total >= 2 * a:                 # trapecio: T = total - a
+        nominal = total - a
+        if tau <= a:
+            return tau * tau / (2 * a)
+        if tau >= total - a:
+            return nominal - (total - tau) ** 2 / (2 * a)
+        return tau - a / 2
+    nominal = total * total / (4 * a)  # triángulo
+    if tau <= total / 2:
+        return tau * tau / (2 * a)
+    return nominal - (total - tau) ** 2 / (2 * a)
 
 
 def simulate(backup: PadBackup, model: RobotModel, inputs: dict[int, bool] | None = None,
              start_deg: list[float] | None = None, tools: dict[int, Pose6] | None = None,
-             frames: dict[int, Pose6] | None = None) -> SimResult:
-    return PadSimulator(model, inputs, start_deg, tools, frames).run(backup)
+             frames: dict[int, Pose6] | None = None, accel_s: float = 0.0) -> SimResult:
+    return PadSimulator(model, inputs, start_deg, tools, frames, accel_s=accel_s).run(backup)
 
 
 def inputs_used(backup: PadBackup) -> list[int]:

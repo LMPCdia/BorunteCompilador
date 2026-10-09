@@ -55,6 +55,7 @@ from pad.listing import io_name
 from sim import collision
 from sim.kinematics import RobotModel, identity, pose_matrix, rot_axis
 from sim.meshes import Mesh, MeshError, load_mesh
+from sim.motion import MotionCurves, analyze
 from sim.pad_sim import Cancelled, PadSimulator, SimResult, inputs_used
 from sim.scene import Layout, LayoutObject, Timeline, has_real_meshes, robot_link_meshes
 
@@ -64,6 +65,9 @@ OBJECT_COLUMNS = ["Pieza", "X", "Y", "Z", "Giro Z°", "Se trabaja"]
 WORKPIECE_COLUMN = 5
 POSE_COLUMNS = ["N°", "X", "Y", "Z", "U", "V", "W"]
 DEFAULT_MODEL = "BRTIRUS1510A"  # el robot de la celda
+# Arranque y frenado de cada movimiento. HIPÓTESIS: el respaldo no trae la
+# aceleración del controlador; ver sim/pad_sim.py.
+DEFAULT_ACCEL_S = 0.25
 IMPORT_AT = (1200.0, 0.0)      # dónde aparece una pieza importada (frente al robot)
 MAX_REPORTED_ISSUES = 12       # a la ventana de mensajes; el resto, en "Problemas"
 COLOR_MOVEJ = (0.35, 0.75, 1.0)
@@ -231,6 +235,9 @@ class SimView(QWidget):
         self.backup_path: Path | None = None
         self.result: SimResult | None = None
         self.collisions: collision.CollisionReport | None = None
+        self.curves: MotionCurves | None = None
+        self.charts = None  # ventana de gráficas (se crea al abrirla)
+        self._accel_used = 0.0
         self._painted: dict[int, str] = {}  # pieza -> color que se le puso por choque
         self.timeline: Timeline | None = None
         self.stale = False
@@ -328,11 +335,31 @@ class SimView(QWidget):
         self.slider.setRange(0, SLIDER_STEPS)
         self.slider.valueChanged.connect(self._on_slider)
         self.time_label = QLabel("—")
+        self.accel_spin = QDoubleSpinBox()
+        self.accel_spin.setRange(0.0, 2.0)
+        self.accel_spin.setDecimals(2)
+        self.accel_spin.setSingleStep(0.05)
+        self.accel_spin.setSuffix(" s")
+        self.accel_spin.setToolTip(
+            "Tiempo que tarda cada movimiento en acelerar (y en frenar). SUPUESTO: el respaldo "
+            "del pad no trae la aceleración real del controlador. 0 = velocidad constante.")
+        try:
+            accel = float(self._settings.value("sim/accel_s", DEFAULT_ACCEL_S))
+        except (TypeError, ValueError):
+            accel = DEFAULT_ACCEL_S
+        self.accel_spin.setValue(accel)
+        self.accel_spin.valueChanged.connect(self._on_accel_changed)
+        self.charts_btn = QPushButton("Gráficas…")
+        self.charts_btn.setToolTip("Posición, velocidad y aceleración de cada eje y de la punta")
+        self.charts_btn.clicked.connect(self.show_charts)
         bottom = QHBoxLayout()
         bottom.addWidget(self.play_btn)
         bottom.addWidget(self.speed_combo)
         bottom.addWidget(self.slider, 1)
         bottom.addWidget(self.time_label)
+        bottom.addWidget(QLabel("Aceleración:"))
+        bottom.addWidget(self.accel_spin)
+        bottom.addWidget(self.charts_btn)
 
         center = QWidget()
         center_layout = QVBoxLayout(center)
@@ -642,6 +669,7 @@ class SimView(QWidget):
         self.play_btn.setChecked(False)
         self.result = None
         self.collisions = None
+        self.curves = None
         self._paint_collisions(None)
         self.timeline = None
         self.stale = False
@@ -688,7 +716,8 @@ class SimView(QWidget):
         QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             simulator = PadSimulator(self.model, self.inputs(), tools=self.layout_data.tools,
-                                     frames=self.layout_data.frames, progress=self._progress)
+                                     frames=self.layout_data.frames, progress=self._progress,
+                                     accel_s=self.accel_spin.value())
             result = simulator.run(backup)
             report = self._check_collisions(result)
         except Cancelled:
@@ -713,6 +742,9 @@ class SimView(QWidget):
         self._paint_collisions(None)
         self.stale = False
         self.timeline = Timeline(result)
+        self._accel_used = self.accel_spin.value()
+        self.curves = analyze(self.timeline, self.model, simulator.tools, self._accel_used)
+        self._refresh_charts()
         self._draw_path(simulator)
         self._show_issues(result)
         self._show_summary(result)
@@ -757,6 +789,8 @@ class SimView(QWidget):
     def cancel(self) -> None:
         """Cortar una simulación en curso (p. ej. al cerrar la ventana)."""
         self._cancel = True
+        if self.charts is not None:
+            self.charts.close()
 
     def source_changed(self) -> None:
         """El programa del editor (quizás) cambió. Se compara el texto: el
@@ -809,8 +843,11 @@ class SimView(QWidget):
                          f"({', '.join(causes)})</b>")
         time_note = " (parcial)" if result.skipped_moves or not result.complete else ""
         cycle = " (un ciclo: el programa se repite)" if result.cyclic else ""
+        accel = self._accel_used
+        accel_note = (f"con arranque/frenado supuesto de {accel:g} s" if accel > 0
+                      else "sin aceleraciones")
         parts.append(f"tiempo de ciclo estimado {result.total_time_s:.1f} s{time_note}{cycle}, "
-                     f"sin aceleraciones")
+                     f"{accel_note}")
         parts.append(f"{errors} error(es), {warnings} aviso(s)")
         report = self.collisions
         if report is not None:
@@ -918,11 +955,39 @@ class SimView(QWidget):
         q, where = self.timeline.at(self._t)
         self.show_pose(q)
         self._paint_collisions(self.collisions.state_at(self._t) if self.collisions else None)
+        if self.charts is not None:
+            self.charts.set_time(self._t)
         self.time_label.setText(f"{self._t:6.1f} / {self.timeline.duration:.1f} s  {where}")
         if self.timeline.duration > 0:
             self.slider.blockSignals(True)
             self.slider.setValue(round(self._t / self.timeline.duration * SLIDER_STEPS))
             self.slider.blockSignals(False)
+
+    # -- gráficas ---------------------------------------------------------------------
+
+    def show_charts(self) -> None:
+        from gui.motion_charts import MotionCharts
+
+        if self.charts is None:
+            self.charts = MotionCharts(on_time=self._chart_clicked)
+        self._refresh_charts()
+        self.charts.show()
+        self.charts.raise_()
+        self.charts.activateWindow()
+
+    def _refresh_charts(self) -> None:
+        if self.charts is None or self.curves is None or self.model is None:
+            return
+        self.charts.set_data(self.curves, self.model, self._accel_used, self.collisions)
+        self.charts.set_time(self._t)
+
+    def _chart_clicked(self, t: float) -> None:
+        self.play_btn.setChecked(False)
+        self.set_time(t)
+
+    def _on_accel_changed(self, value: float) -> None:
+        self._settings.setValue("sim/accel_s", float(value))
+        self._mark_stale("cambió el tiempo de aceleración")
 
     def _paint_collisions(self, state: dict[int, str] | None) -> None:
         """Pinta de rojo (choca) o naranja (cerca) las piezas en este instante."""

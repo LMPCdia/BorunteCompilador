@@ -204,6 +204,26 @@ def _self_test() -> int:
 
     paso("buscar choques (python-fcl)", buscar_choques)
 
+    def graficas():
+        # QtCharts es un módulo aparte de PySide6: si el .exe no lo trae, la
+        # ventana de gráficas no abre.
+        from compiler.pad_codegen import compile_to_pad
+        from gui.motion_charts import MotionCharts
+        from sim.kinematics import RobotModel
+        from sim.motion import analyze
+        from sim.pad_sim import simulate
+        from sim.scene import Timeline
+
+        model = RobotModel.load("BRTIRUS1510A")
+        result = simulate(compile_to_pad("MOVEJ JOINT(0, 45, -45, 0, -75, 0) SPEED 50\n"
+                                         "MOVEJ JOINT(30, 45, -45, 0, -75, 0) SPEED 50\n"),
+                          model, accel_s=0.25)
+        curves = analyze(Timeline(result), model, accel_s=0.25)
+        assert max(curves.speed[0]) > 0, "J1 no se movió"
+        MotionCharts().set_data(curves, model, 0.25)
+
+    paso("gráficas de movimiento (QtCharts)", graficas)
+
     _emit()
     fallas = 0
     for nombre, ok, detalle in pasos:
