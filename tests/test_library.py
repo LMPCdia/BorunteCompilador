@@ -19,7 +19,7 @@ def entry(entry_id: str, name: str, folder: bool) -> str:
 
 
 def page(*entries: str) -> bytes:
-    return ("<html><body><div class='flip-entries'>" + "".join(entries) +
+    return ('<html><body><div class="flip-entries">' + "".join(entries) +
             "</div></body></html>").encode("utf-8")
 
 
@@ -39,10 +39,16 @@ class FakeDrive:
                                  entry("D_TOOLS00000", "Herramientas", True),
                                  entry("D_MESAS00000", "Mesas &amp; bases", True),
                                  entry("D_1510A00000", "1510A", True)),
-            "D_ROBOTS0000": page(entry("F_OTRO", "otro.step", False)),
-            "D_TOOLS00000": page(entry("F_ANT", "antorcha.stl", False)),
+            "D_ROBOTS0000": page(entry("F_OTRO", "otro.step", False),
+                                 entry("D_VACIA00000", "carpeta vacía", True)),
+            "D_VACIA00000": page(),
+            "D_TOOLS00000": page(entry("F_ANT", "antorcha.stl", False),
+                                 entry("D_GRIP000000", "Grippers", True)),
+            "D_GRIP000000": page(entry("F_IPT", "gripper.ipt", False)),
             "D_MESAS00000": page(entry("F_MESA", "mesa.stl", False),
-                                 entry("F_SW", "mesa.SLDPRT", False)),
+                                 entry("F_SW", "mesa.SLDPRT", False),
+                                 entry("F_DOC", "LEEME - cómo cargar modelos", False),
+                                 entry("F_PDF", "plano mesa.pdf", False)),
             "D_1510A00000": page(entry("F_ROBOT", "BRTIRUS1510A modelo.STEP", False),
                                  entry("ROOT00000000", "vuelta a la raíz", True)),
         }
@@ -89,7 +95,7 @@ def test_scan_classifies_by_folder(drive):
     assert kinds["antorcha.stl"] == ("herramienta", "Herramientas")
     assert kinds["mesa.stl"] == ("pieza", "Mesas & bases")            # entidades HTML
     assert kinds["BRTIRUS1510A modelo.STEP"] == ("robot", "1510A")     # por el nombre
-    assert catalog.unusable == ["Mesas & bases/mesa.SLDPRT"]
+    assert sorted(catalog.unusable) == ["Herramientas/Grippers/gripper.ipt", "Mesas & bases/mesa.SLDPRT"]
     robot = next(i for i in catalog.items if i.kind == "robot" and i.category == "1510A")
     assert robot.robot_name == "BRTIRUS1510A"
     assert len(catalog.items) == 4                                     # la vuelta no repite
@@ -154,7 +160,7 @@ def test_opening_the_tab_reads_the_folder(view):
     tree = view.library.tree
     groups = [tree.topLevelItem(i).text(0) for i in range(tree.topLevelItemCount())]
     assert groups == ["Robots", "Herramientas", "Mesas & bases", "1510A"]
-    assert "1 archivo(s) de CAD nativo" in view.library.status.text()
+    assert "2 archivo(s) de CAD nativo" in view.library.status.text()
 
 
 def test_insert_a_piece_and_mount_a_tool(view, tmp_path):
@@ -257,3 +263,14 @@ def test_refresh_in_a_background_thread(view):
     assert not view.library.busy
     assert view.library.tree.topLevelItemCount() == 4
     assert view.library.refresh_btn.isEnabled()
+
+
+def test_command_line_lists_and_points_out_what_to_fix(drive, capsys):
+    assert library.main(["ROOT00000000"], fetch=drive) == 0
+    out = capsys.readouterr().out
+    assert "Herramientas/\n  [herramienta] antorcha.stl" in out
+    assert "«1510A/BRTIRUS1510A modelo.STEP» es un robot: va en Robots/BRTIRUS1510A/" in out
+    assert "«Robots/otro.step» está en Robots pero el nombre no dice el modelo" in out
+    assert "«Herramientas/Grippers/gripper.ipt» es CAD nativo: exportarlo a STEP" in out
+    assert "mesa.SLDPRT" not in out          # al lado de su STL: es una referencia
+    assert library.main(["NOCOMPARTIDA0"], fetch=drive) == 2

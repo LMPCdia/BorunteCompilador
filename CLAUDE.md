@@ -75,6 +75,9 @@ respaldo real; la lógica se prueba contra `comms/robot_simulator.py`.
 - **`packaging/`** + `.github/workflows/build-exe.yml`: `.exe` de un solo
   archivo construido en un runner Windows, con `--self-test` como criterio.
 
+**Skill `actualizar-simulador`** (`.claude/skills/`): revisar la carpeta de
+Drive (`python -m sim.library`), importar un robot nuevo, publicar el `.exe`.
+
 ## Cosas que ya se aprendieron a golpes (no repetirlas)
 
 1. **`compiler/grammar.lark` y `pad/template.fnc` se leen como archivos en

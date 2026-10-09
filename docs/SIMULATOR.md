@@ -89,6 +89,10 @@ Clasificación **por carpeta** (no por nombre de archivo):
   `~/BorunteDSL/modelos/<MODELO>.json`.
 - Límite: la vista web de Drive muestra hasta unos cientos de archivos por
   carpeta.
+- Revisar la carpeta desde la consola: `python -m sim.library` muestra el
+  árbol y lo que está fuera de lugar (archivos sueltos en la raíz, robots
+  fuera de `Robots/`, CAD nativo sin un STEP al lado). Las reglas para quien
+  sube archivos están en el doc *LEEME - cómo cargar modelos* de la carpeta.
 
 ## Gráficas de movimiento (`sim/motion.py`, `gui/motion_charts.py`)
 

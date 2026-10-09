@@ -37,6 +37,11 @@ CACHE_DIR = Path.home() / "BorunteDSL" / "biblioteca"
 FOLDER_URL = "https://drive.google.com/embeddedfolderview?id={id}"
 DOWNLOAD_URL = "https://drive.usercontent.google.com/download?id={id}&export=download&confirm=t"
 USABLE = (".step", ".stp", ".stl", ".obj")
+# CAD que el simulador no lee: se cuentan para avisar que hay que exportarlos.
+# Lo demás (un LEEME, fotos, planos en PDF) se ignora sin decir nada.
+NATIVE_CAD = (".sldprt", ".sldasm", ".slddrw", ".ipt", ".iam", ".idw", ".x_t", ".x_b",
+              ".igs", ".iges", ".dwg", ".dxf", ".3dm", ".prt", ".asm", ".catpart", ".catproduct",
+              ".f3d", ".sat", ".jt", ".3mf", ".ply", ".fbx")
 MAX_DEPTH = 5
 TIMEOUT_S = 30
 
@@ -123,7 +128,9 @@ def parse_folder(page: str) -> list[Entry]:
 def list_folder(fid: str, fetch: Fetch = _http) -> list[Entry]:
     body, _headers = fetch(FOLDER_URL.format(id=fid), "GET")
     page = body.decode("utf-8", "replace")
-    if "flip-entry" not in page and "flip-empty" not in page:
+    # Una carpeta vacía igual trae el contenedor "flip-entries"; lo que no
+    # lo trae es la página de "pedí acceso" de una carpeta no compartida.
+    if "flip-entries" not in page and "flip-entry" not in page:
         raise LibraryError("Drive no mostró la carpeta. ¿Está compartida como «Cualquier persona "
                            "con el enlace»?")
     return parse_folder(page)
@@ -154,7 +161,8 @@ def scan(root: str, fetch: Fetch = _http) -> Catalog:
                     pending.append((entry.id, path + [entry.name], depth + 1))
                 continue
             if not entry.name.lower().endswith(USABLE):
-                unusable.append("/".join(path + [entry.name]))
+                if entry.name.lower().endswith(NATIVE_CAD):
+                    unusable.append("/".join(path + [entry.name]))
                 continue
             category = path[0] if path else ""
             folder = "/".join(path)
@@ -200,3 +208,56 @@ def download(item: Item, cache_dir: Path = CACHE_DIR, fetch: Fetch = _http,
             "last-modified": headers.get("last-modified", ""), "name": item.name}
     meta_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
     return path
+
+
+# --- revisar la carpeta (línea de comandos) --------------------------------------------------
+
+
+def problems(catalog: Catalog) -> list[str]:
+    """Lo que está fuera de lugar según la estructura acordada (ver el LEEME
+    de la carpeta y docs/SIMULATOR.md)."""
+    out = []
+    for item in catalog.items:
+        where = f"{item.folder}/{item.name}" if item.folder else item.name
+        if not item.category:
+            out.append(f"«{where}» está suelto en la raíz: moverlo a la carpeta de su categoría")
+        if item.kind == "robot" and item.category.lower() != "robots":
+            out.append(f"«{where}» es un robot: va en Robots/{item.robot_name or '<MODELO>'}/")
+        if item.kind == "robot" and not item.robot_name:
+            out.append(f"«{where}» está en Robots pero el nombre no dice el modelo (BRTIRUSxxxxA)")
+    # CAD nativo al lado de un STEP es una copia de referencia (como las piezas
+    # de SolidWorks junto al ensamble del robot): solo molesta si en esa
+    # carpeta no hay nada que el simulador pueda usar.
+    usable_folders = {item.folder for item in catalog.items}
+    for path in catalog.unusable:
+        folder = path.rsplit("/", 1)[0] if "/" in path else ""
+        if folder not in usable_folders:
+            out.append(f"«{path}» es CAD nativo: exportarlo a STEP")
+    return out
+
+
+def main(argv: list[str] | None = None, fetch: Fetch = _http) -> int:
+    """python -m sim.library [CARPETA]: qué hay en la biblioteca y qué está mal ubicado."""
+    import sys
+
+    args = sys.argv[1:] if argv is None else argv
+    try:
+        catalog = scan(args[0] if args else DEFAULT_FOLDER, fetch)
+    except LibraryError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
+    for category in catalog.categories():
+        print(f"{category or '(raíz)'}/")
+        for item in catalog.items:
+            if item.category == category:
+                sub = item.folder[len(category):].strip("/")
+                print(f"  [{item.kind}] {sub + '/' if sub else ''}{item.name}")
+    issues = problems(catalog)
+    print(f"\n{len(catalog.items)} modelo(s); {len(issues)} cosa(s) para acomodar")
+    for issue in issues:
+        print(f"  - {issue}")
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
