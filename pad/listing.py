@@ -17,6 +17,7 @@ import re
 import sys
 from typing import Any
 
+from pad import bindio
 from pad.backup import Action, Module, PadBackup
 
 MOVEJ = 4
@@ -47,12 +48,17 @@ _MOVE_DEFAULTS = {
 }
 _MOVE_SHOWN = {"action", "insertedIndex", "points", "speed", "toolCoord", "customName"}
 
+# 53000 con estos campos exactos es lo que el pad muestra como `Cmd Set:Stop`
+# (visto una vez, al principio del principal). Cualquier otro 53000 se muestra crudo.
+CMD_STOP = {"addr": 98304, "data": 2561, "op": 0, "specialType": 1, "type": 0, "typeSel": 1}
+
 
 def io_name(prefix: str, point: int) -> str:
     """Nombre que muestra el pad para una E/S, a partir del `point` del archivo.
 
-    Deducido de 3 casos (`point` 2 -> X012, 3 -> X013, 20 -> Y034): numeración
-    octal que empieza en 010. Sin confirmar para el resto del rango.
+    Numeración octal que empieza en 010. Coincide con el listado del propio pad
+    en 6 puntos distintos (2 -> X012, 3 -> X013, 4 -> X014, 16 -> X030,
+    17 -> X031, 20 -> Y034) y 65 usos; sin ver todavía para el resto del rango.
     """
     return f"{prefix}{point + 8:03o}"
 
@@ -74,11 +80,26 @@ def describe(action: Action, labels: dict[int, str], modules: dict[int, str]) ->
         pos = action["points"][0]["pos"]
         values = ", ".join(pos[f"m{i}"] for i in range(6))
         tool, coord = split_tool_coord(action["toolCoord"])
+        bind = bindio.decode(int(action.get("bindIOInfo") or 0))
+        shown = set(_MOVE_SHOWN)
+        opts = []
+        if action.get("smooth", 0) != 0:
+            opts.append(f"SMOOTH {action['smooth']}")
+            shown.add("smooth")
+        if action.get("delay", "0.000") != "0.000":
+            opts.append(f"DELAY {action['delay']}")
+            shown.add("delay")
+        if bind is not None:
+            # Una salida que cambia según la distancia al punto (pad/bindio.py).
+            word = "NEAR_END" if bind.end else "AWAY_START"
+            opts.append(f"{word} {io_name('Y', bind.point)} {'ON' if bind.on else 'OFF'} "
+                        f"{action.get('distance', '0.000')}mm" + ("" if bind.enabled else " DISABLED"))
+            shown |= {"bindIOInfo", "distance"}
         extra = [f"{k}={v}" for k, v in action.items()
-                 if k not in _MOVE_SHOWN and _MOVE_DEFAULTS.get(k, object()) != v]
+                 if k not in shown and _MOVE_DEFAULTS.get(k, object()) != v]
         name = f"  ; {action['customName']}" if action.get("customName") else ""
         text = f"{kind} ({values}) SPEED {action['speed']} TOOL {tool} COORD {coord}"
-        return text + (" " + " ".join(extra) if extra else "") + name
+        return text + "".join(" " + o for o in opts) + (" " + " ".join(extra) if extra else "") + name
     if code == WAIT_TIME:
         return f"WAIT {action['limit']} s"
     if code == SET_OUT:
@@ -106,6 +127,8 @@ def describe(action: Action, labels: dict[int, str], modules: dict[int, str]) ->
         return "END"
     if code == LABEL:
         return f"{action.get('comment', '')}:   ; flag {action['flag']}"
+    if code == SPECIAL_WRITE and all(action.get(k) == v for k, v in CMD_STOP.items()):
+        return "CMD STOP"
     if code == COMMENT:
         text = re.sub(r"(&nbsp;)+", " ", action.get("comment", "")).strip()
         if "commentAction" in action:

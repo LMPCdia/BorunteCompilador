@@ -160,15 +160,25 @@ def test_listing_names_the_known_actions():
 
 
 def test_listing_shows_non_default_move_fields():
-    move = dict(MOVE, smooth=4, bindIOInfo=20545, distance="2.000")
+    move = dict(MOVE, smooth=4, delay="1.000", bindIOInfo=20545, distance="2.000")
     line = describe(move, {}, {})
-    assert "smooth=4" in line and "bindIOInfo=20545" in line and "distance=2.000" in line
+    assert "SMOOTH 4" in line and "DELAY 1.000" in line
+    # bindIOInfo 20545 = 0x5041: pasada la distancia al punto inicial, Y034 pasa a OFF.
+    assert "AWAY_START Y034 OFF 2.000mm" in line and "bindIOInfo" not in line
+    end_on = describe(dict(MOVE, bindIOInfo=1069125, distance="1.000"), {}, {})
+    assert "NEAR_END Y034 ON 1.000mm" in end_on
+    # Un valor que no entendemos se muestra crudo, no se esconde.
+    odd = describe(dict(MOVE, bindIOInfo=0x5043, distance="1.000"), {}, {})
+    assert "bindIOInfo=20547" in odd and "distance=1.000" in odd
 
 
-def test_listing_does_not_hide_unknown_actions():
-    line = describe({"action": 53000, "addr": 98304, "data": 2561, "insertedIndex": 2}, {}, {})
-    assert line.startswith("?? acción 53000")
-    assert '"addr": 98304' in line
+def test_listing_names_cmd_stop_and_does_not_hide_unknown_actions():
+    stop = {"action": 53000, "addr": 98304, "data": 2561, "insertedIndex": 2, "op": 0,
+            "specialType": 1, "type": 0, "typeSel": 1}
+    assert describe(stop, {}, {}) == "CMD STOP"
+    other = dict(stop, data=1)
+    line = describe(other, {}, {})
+    assert line.startswith("?? acción 53000") and '"data": 1' in line
 
 
 def test_disabled_action_is_shown_as_such():
