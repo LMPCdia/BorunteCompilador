@@ -37,8 +37,13 @@ from compiler.ast_nodes import (
     Assignment,
     BinOp,
     CallStmt,
+    CmdStopStmt,
+    CommentStmt,
     Const,
+    DisabledStmt,
+    GotoIfStmt,
     IfStmt,
+    LabelStmt,
     MoveStmt,
     PointDecl,
     PointLiteral,
@@ -82,12 +87,17 @@ class CompileError(Exception):
         self.line = line
 
 
+class PadOnlyError(CompileError):
+    """Algo que existe en el pad pero que la VM de la PC no ejecuta (saltos
+    con etiquetas): el programa se puede exportar y simular igual."""
+
+
 def with_line(error: CompileError, stmt) -> CompileError:
     """El mismo error, con "Línea N:" adelante si todavía no la tiene."""
     line = getattr(stmt, "line", None)
     if error.line is not None or line is None:
         return error
-    return CompileError(f"Línea {line}: {error}", line=line)
+    return error.__class__(f"Línea {line}: {error}", line=line)
 
 
 def _io_number(name: str) -> int:
@@ -242,6 +252,13 @@ class _Emitter:
             pass  # v0.2: TIMER es metadata; se usa inline en WAIT <n>s
         elif isinstance(stmt, (ToolStmt, CoordStmt)):
             pass  # solo le importa al pad: la VM de referencia no tiene marcos
+        elif isinstance(stmt, (CommentStmt, CmdStopStmt, DisabledStmt)):
+            pass  # comentarios, Cmd Set:Stop y acciones desactivadas: sin efecto en la VM
+        elif isinstance(stmt, (LabelStmt, GotoIfStmt)) or (
+                isinstance(stmt, CallStmt) and stmt.goto is not None):
+            raise PadOnlyError(
+                "Las etiquetas y los saltos (LABEL, IF … GOTO, THEN GOTO) los ejecuta el pad: la "
+                "VM de la PC no. El programa se puede exportar (Ctrl+E) y simular (F9).")
         elif isinstance(stmt, Assignment):
             self._emit_assignment(stmt)
         elif isinstance(stmt, MoveStmt):

@@ -7,6 +7,7 @@ es seguro de hacer bottom-up porque no dependemos de saber PCs todavía.
 
 from __future__ import annotations
 
+import json
 import math
 from pathlib import Path
 
@@ -23,10 +24,16 @@ from comms.robot_client import Pose
 from compiler.ast_nodes import (
     Assignment,
     BinOp,
+    BindOpt,
     CallStmt,
+    CmdStopStmt,
+    CommentStmt,
     Const,
     CoordStmt,
+    DisabledStmt,
+    GotoIfStmt,
     IfStmt,
+    LabelStmt,
     MoveStmt,
     PointDecl,
     PointLiteral,
@@ -46,8 +53,35 @@ from compiler.ast_nodes import (
 GRAMMAR_PATH = Path(__file__).parent / "grammar.lark"
 
 
+class _PadName(str):
+    """El texto de un `AS "..."` (para no confundirlo con un NAME)."""
+
+
+class _GotoTarget(str):
+    """La etiqueta de un `THEN GOTO etiqueta`."""
+
+
+def _unquote(token) -> str:
+    # ESCAPED_STRING es una cadena de JSON (comillas dobles y \\ escapes).
+    return json.loads(str(token))
+
+
+def _compile_error(message: str):
+    from compiler.codegen import CompileError
+
+    return CompileError(message)
+
+
 def _strip_newline(args: list) -> list:
     return [a for a in args if not (isinstance(a, Token) and a.type == "NEWLINE")]
+
+
+def _whole(value, keyword: str, low: int, high: int) -> int:
+    number = float(value)
+    if not math.isfinite(number) or number != int(number) or not low <= number <= high:
+        raise _compile_error(f"{keyword} {number:g}: tiene que ser un número entero entre "
+                             f"{low} y {high}")
+    return int(number)
 
 
 def _whole_number(value, keyword: str) -> int:
@@ -134,10 +168,13 @@ class _AstBuilder(Transformer):
 
     # -- declaraciones ------------------------------------------------------------
 
+    def as_clause(self, args):
+        return _PadName(_unquote(args[0]))
+
     def point_decl(self, args):
         args = _strip_newline(args)
-        name, expr = args
-        return PointDecl(str(name), expr)
+        name, expr, pad_name = args
+        return PointDecl(str(name), expr, str(pad_name) if pad_name is not None else None)
 
     def var_decl(self, args):
         args = _strip_newline(args)
@@ -165,10 +202,51 @@ class _AstBuilder(Transformer):
     def state(self, args):
         return str(args[0])
 
+    # -- opciones de un movimiento: cada una devuelve (clave, valor) -------------------
+
+    def smooth_opt(self, args):
+        return ("smooth", _whole(args[0], "SMOOTH", 0, 9))
+
+    def delay_opt(self, args):
+        seconds = float(args[0])
+        if not math.isfinite(seconds) or not 0 <= seconds <= 3600:
+            raise _compile_error(f"DELAY {seconds:g}: tiene que estar entre 0 y 3600 segundos")
+        return ("delay_s", seconds)
+
+    def tool_opt(self, args):
+        return ("tool", _whole_number(args[0], "TOOL"))
+
+    def coord_opt(self, args):
+        return ("coord", _whole_number(args[0], "COORD"))
+
+    @staticmethod
+    def _bind(end: bool, args) -> tuple:
+        name, state, mm, disabled = args
+        distance = float(mm)
+        if not math.isfinite(distance) or not 0 <= distance <= 10000:
+            raise _compile_error(f"distancia {distance:g} mm: tiene que estar entre 0 y 10000")
+        return ("bind", BindOpt(end, str(name), str(state) == "ON", distance, disabled is None))
+
+    def near_end_opt(self, args):
+        return self._bind(True, args)
+
+    def away_start_opt(self, args):
+        return self._bind(False, args)
+
+    def bind_disabled(self, args):
+        return str(args[0])
+
     def move_stmt(self, args):
         args = _strip_newline(args)
-        kind, point, speed = args
-        return MoveStmt(str(kind), point, float(speed))
+        kind, point, speed, *options = args
+        fields: dict = {}
+        for key, value in options:
+            if key in fields:
+                names = {"smooth": "SMOOTH", "delay_s": "DELAY", "tool": "TOOL", "coord": "COORD",
+                         "bind": "NEAR_END / AWAY_START"}
+                raise _compile_error(f"{names[key]} repetido en el mismo movimiento")
+            fields[key] = value
+        return MoveStmt(str(kind), point, float(speed), **fields)
 
     def wait_in_stmt(self, args):
         args = _strip_newline(args)
@@ -194,6 +272,39 @@ class _AstBuilder(Transformer):
         args = _strip_newline(args)
         name, state = args
         return SetOutStmt(str(name), str(state) == "ON")
+
+    def label_stmt(self, args):
+        args = _strip_newline(args)
+        name, number, pad_name = args
+        if number is not None:
+            number = _whole(number, "LABEL", 0, 9999)
+        return LabelStmt(str(name), number, str(pad_name) if pad_name is not None else None)
+
+    def goto_if_stmt(self, args):
+        args = _strip_newline(args)
+        cond, label = args
+        if isinstance(cond, BinOp) and cond.op == "==" and isinstance(cond.right, VarRef):
+            cond = BinOp("==", cond.right, cond.left)
+        if not (isinstance(cond, BinOp) and cond.op == "==" and isinstance(cond.left, VarRef)
+                and isinstance(cond.right, Const) and cond.right.value in (0, 1)):
+            raise _compile_error("IF … GOTO solo pregunta por una entrada: "
+                                 "IF X030 == 1 GOTO etiqueta")
+        return GotoIfStmt(cond.left.name, int(cond.right.value), str(label))
+
+    def disabled_stmt(self, args):
+        args = _strip_newline(args)
+        (inner,) = args
+        return DisabledStmt(inner)
+
+    def comment_stmt(self, args):
+        args = _strip_newline(args)
+        return CommentStmt(_unquote(args[0]))
+
+    def cmd_stop_stmt(self, args):
+        return CmdStopStmt()
+
+    def goto_clause(self, args):
+        return _GotoTarget(str(args[0]))
 
     def blank_line(self, args):
         # Línea vacía o solo-comentario: no produce nodo. Las reglas que
@@ -221,8 +332,9 @@ class _AstBuilder(Transformer):
         args = _strip_newline(args)
         args = [a for a in args if a is not None]
         name = str(args[0])
-        call_args = [self._to_expr(a) for a in args[1:]]
-        return CallStmt(name, call_args)
+        goto = next((str(a) for a in args if isinstance(a, _GotoTarget)), None)
+        call_args = [self._to_expr(a) for a in args[1:] if not isinstance(a, _GotoTarget)]
+        return CallStmt(name, call_args, goto)
 
     def proc_body(self, args):
         return self._stmt_list(args)
@@ -231,10 +343,13 @@ class _AstBuilder(Transformer):
         args = _strip_newline(args)
         args = [a for a in args if a is not None]
         name = str(args[0])
-        # args puede incluir params (NAME sueltos) antes del proc_body (una lista)
+        # args puede incluir params (NAME sueltos) y un `AS "..."` antes del
+        # proc_body (una lista)
         body = args[-1]
-        params = [str(p) for p in args[1:-1]]
-        return ProcDecl(name, params, body)
+        middle = args[1:-1]
+        pad_name = next((str(a) for a in middle if isinstance(a, _PadName)), None)
+        params = [str(p) for p in middle if not isinstance(p, _PadName)]
+        return ProcDecl(name, params, body, pad_name)
 
     def start(self, args):
         return SourceProgram(self._stmt_list(args))
@@ -253,6 +368,7 @@ _TOKEN_NAMES = {
     "NEWLINE": "fin de línea", "LPAR": "«(»", "RPAR": "«)»", "COMMA": "«,»",
     "EQUAL": "«=»", "COLON": "«:»", "PLUS": "«+»", "MINUS": "«-»",
     "NAME": "un nombre", "SIGNED_NUMBER": "un número", "$END": "fin del archivo",
+    "STRING": "un texto entre comillas",
     "S": "«s»",
 }
 
@@ -261,6 +377,8 @@ _KEYWORDS = {
     "POINT", "VAR", "TIMER", "PROC", "ENDPROC", "IF", "THEN", "ELSE", "ENDIF", "WAIT", "WAIT_IN",
     "UNTIL", "MOVE_DONE", "SET_OUT", "SPEED", "MOVEJ", "MOVEL", "WORLD", "JOINT", "OFFSET",
     "TOOL", "COORD", "ON", "OFF", "INT", "REAL", "BOOL",
+    "SMOOTH", "DELAY", "NEAR_END", "AWAY_START", "DISABLED", "LABEL", "GOTO", "COMMENT", "CMD",
+    "STOP", "AS",
 }
 
 

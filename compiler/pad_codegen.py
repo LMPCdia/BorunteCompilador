@@ -24,6 +24,12 @@ probó todavía importando en el pad**. Por eso el generador es conservador:
 | `TOOL n` / `COORD n`        | `801` / `800` + `toolCoord` de cada movimiento | Deducido |
 | `IF Xnnn == 1 THEN`         | `10001` con `pointStatus: 0`: nunca visto | **Sin confirmar** |
 | llamada desde un PROC       | `20000` dentro de un módulo: nunca visto | **Sin confirmar** |
+| `SMOOTH n`, `DELAY s`, `TOOL n`/`COORD n` en el movimiento | `smooth`, `delay`, `toolCoord` del movimiento | Visto en el listado del pad |
+| `NEAR_END`/`AWAY_START Ynnn ON/OFF mm` | `bindIOInfo` + `distance` (`pad/bindio.py`) | Visto en el listado del pad |
+| `LABEL n [núm]`, `IF Xnnn == 1 GOTO n`, `P() THEN GOTO n` | `59999`, `10001` (`pointStatus: 1`), `20000` con `flag` | Visto (44 / 45 / 3 casos) |
+| `IF Xnnn == 0 GOTO n` | `10001` con `pointStatus: 0`: nunca visto | **Sin confirmar** |
+| `DISABLED SET_OUT / IF…GOTO` | `50000` con `commentAction` y el texto del pad | Visto (167 casos) |
+| `COMMENT "texto"`, `CMD STOP` | `50000`, `53000` (`Cmd Set:Stop`) | Visto |
 
 `TOOL` y `COORD` valen para los movimientos que siguen, hasta el final del
 programa o del PROC donde están; cada PROC arranca con los valores de
@@ -59,8 +65,13 @@ from compiler.ast_nodes import (
     Assignment,
     BinOp,
     CallStmt,
+    CmdStopStmt,
+    CommentStmt,
     Const,
+    DisabledStmt,
+    GotoIfStmt,
     IfStmt,
+    LabelStmt,
     MoveStmt,
     PointDecl,
     PointLiteral,
@@ -77,6 +88,8 @@ from compiler.ast_nodes import (
     WaitTimeStmt,
 )
 from compiler.codegen import CompileError, with_line
+from pad import bindio
+from pad.listing import io_name
 from pad.backup import (
     MAIN_LINE,
     MODULES_LINE,
@@ -119,6 +132,9 @@ class PadOptions:
     template: PadBackup | None = None
     # Permite lo que el respaldo real nunca mostró (ver la tabla de arriba).
     allow_unverified: bool = False
+    # `.fnc` (configuración del programa) a escribir en el respaldo: el del
+    # respaldo original de un programa importado. Sin él, el de `template`.
+    fnc: bytes | None = None
 
 
 def _check_tool_coord(value: int, word: str) -> int:
@@ -174,6 +190,9 @@ class _Builder:
         self.name = name
         self.actions: list[Action] = []
         self._next_flag = 0
+        self.label_flags: dict[str, int] = {}     # etiquetas del usuario -> número
+        self.label_text: dict[str, str] = {}      # y el nombre que muestra el pad
+        self.reserved_flags: set[int] = set()
         self.tool = tool
         self.coord = coord
         self.if_depth = 0
@@ -190,9 +209,25 @@ class _Builder:
         return action
 
     def new_flag(self) -> int:
+        while self._next_flag in self.reserved_flags:
+            self._next_flag += 1
         flag = self._next_flag
         self._next_flag += 1
         return flag
+
+    def flag_of(self, label: str) -> int:
+        if label not in self.label_flags:
+            where = "el programa principal" if self.is_main else f"el PROC {self.name}"
+            raise CompileError(f"La etiqueta {label!r} no está definida en {where} "
+                               f"(LABEL {label}). Las etiquetas valen dentro de cada PROC.")
+        return self.label_flags[label]
+
+    def add_disabled(self, fields: Action, text: str) -> Action:
+        """Una acción desactivada: el pad la guarda como un comentario con la
+        acción original adentro y, en `comment`, el texto con que la mostraba."""
+        index = len(self.actions)
+        inner = _sorted({**fields, "insertedIndex": index})
+        return self.add(action=50000, comment=_NBSP * 8 + text, commentAction=inner)
 
     def place_label(self, flag: int, name: str) -> None:
         self.add(action=59999, comment=name, flag=flag)
@@ -202,6 +237,7 @@ class _Builder:
 class _Point:
     pose: Pose
     frame: str  # "WORLD" | "JOINT"
+    label: str | None = None  # `AS "..."`: el nombre que muestra el pad
 
 
 @dataclass
@@ -271,7 +307,8 @@ class _Compiler:
         if isinstance(stmt, PointDecl):
             if stmt.name in self.points:
                 raise CompileError(f"POINT {stmt.name!r} ya estaba declarado")
-            self.points[stmt.name] = self.resolve_point(stmt.expr)
+            point = self.resolve_point(stmt.expr)
+            self.points[stmt.name] = _Point(point.pose, point.frame, stmt.pad_name)
         elif isinstance(stmt, TimerDecl):
             self.warn(stmt, f"TIMER {stmt.name} no se exporta al pad (no hace nada todavía).")
         elif isinstance(stmt, (ToolStmt, CoordStmt)):
@@ -298,6 +335,17 @@ class _Compiler:
                     point=0, pointStatus=0, type=100)
         elif isinstance(stmt, IfStmt):
             self._emit_if(stmt, out)
+        elif isinstance(stmt, LabelStmt):
+            out.place_label(out.flag_of(stmt.name),
+                            stmt.pad_name if stmt.pad_name is not None else stmt.name)
+        elif isinstance(stmt, GotoIfStmt):
+            self._emit_goto_if(stmt, out)
+        elif isinstance(stmt, DisabledStmt):
+            self._emit_disabled(stmt, out)
+        elif isinstance(stmt, CommentStmt):
+            out.add(action=50000, comment=stmt.text)
+        elif isinstance(stmt, CmdStopStmt):
+            out.add(action=53000, **_CMD_STOP)
         elif isinstance(stmt, CallStmt):
             self._emit_call(stmt, out)
         elif isinstance(stmt, ProcDecl):
@@ -364,15 +412,66 @@ class _Compiler:
         values = [_finite(v, n) for v, n in zip((p.a, p.b, p.c, p.d, p.e, p.f), names)]
         pos = {f"m{i}": _fmt3(v) for i, v in enumerate(values)}
         pos.update(m6="0.000", m7="0.000")
-        name = stmt.point.name if isinstance(stmt.point, PointName) else ""
+        name = ""
+        if isinstance(stmt.point, PointName):
+            name = stmt.point.name
+            if point.label is not None:
+                name = point.label
+        tool = _check_tool_coord(stmt.tool if stmt.tool is not None else out.tool, "TOOL")
+        coord = _check_tool_coord(stmt.coord if stmt.coord is not None else out.coord, "COORD")
+        bind_info, distance = 0, "0.000"
+        if stmt.bind is not None:
+            bind_info, distance = self._bind(stmt.bind)
         out.has_moves = True
         out.add(
             action=4 if stmt.kind == "MOVEJ" else 10,
-            bindIOInfo=0, ckStatus="63", customName=name, delay="0.000", distance="0.000",
+            bindIOInfo=bind_info, ckStatus="63", customName=name,
+            delay=_fmt3(stmt.delay_s or 0.0), distance=distance,
             passTrans=0, points=[{"pointName": "", "pos": pos}], quotePoint=[0, 0, 0],
-            relativeType=0, smooth=0, speed=f"{speed:.1f}",
-            toolCoord=(out.tool << 16) | out.coord,
+            relativeType=0, smooth=stmt.smooth or 0, speed=f"{speed:.1f}",
+            toolCoord=(tool << 16) | coord,
         )
+
+    @staticmethod
+    def _bind(bind) -> tuple[int, str]:
+        """`NEAR_END`/`AWAY_START` -> (bindIOInfo, distance). Ver pad/bindio.py."""
+        point = io_point(bind.io_name, "Y")
+        if not math.isfinite(bind.distance_mm) or not 0 <= bind.distance_mm <= MAX_ABS_POSITION:
+            raise CompileError(f"distancia {bind.distance_mm:g} mm: fuera de rango")
+        info = bindio.BindIO(point=point, end=bind.end, on=bind.on, enabled=bind.enabled)
+        return info.encode(), _fmt3(bind.distance_mm)
+
+    def _goto_if_fields(self, stmt: GotoIfStmt, out: _Builder) -> tuple[Action, str]:
+        point = io_point(stmt.io_name, "X")
+        flag = out.flag_of(stmt.label)
+        status = 1 if stmt.value == 1 else 0
+        if status == 0:
+            self.unverified(
+                f"IF {stmt.io_name} == 0 GOTO {stmt.label} necesita «si la entrada está en OFF, "
+                f"saltar» (pointStatus 0). Alternativa confirmada: IF {stmt.io_name} == 1 GOTO.")
+        fields = dict(action=10001, flag=flag, inout=0, limit="0.000", point=point,
+                      pointStatus=status, type=0)
+        text = (f"IF:{io_name('X', point)}{'ON' if status else 'OFF'} Lim:0.000 "
+                f"Go to Flag[{flag}]:{out.label_text.get(stmt.label, stmt.label)}")
+        return fields, text
+
+    def _emit_goto_if(self, stmt: GotoIfStmt, out: _Builder) -> None:
+        fields, _text = self._goto_if_fields(stmt, out)
+        out.add(**fields)
+
+    def _emit_disabled(self, stmt: DisabledStmt, out: _Builder) -> None:
+        inner = stmt.inner
+        if isinstance(inner, SetOutStmt):
+            point = io_point(inner.io_name, "Y")
+            fields = dict(action=200, delay="0.000", isWaitInput=False, point=point,
+                          pointStatus=inner.state, type=0, valveID=point)
+            text = f"Output:{io_name('Y', point)}{'ON' if inner.state else 'OFF'} DLY0.000"
+        elif isinstance(inner, GotoIfStmt):
+            fields, text = self._goto_if_fields(inner, out)
+        else:
+            raise CompileError("DISABLED solo vale para SET_OUT e IF … GOTO: es lo único que "
+                               "se vio desactivado en un respaldo real.")
+        out.add_disabled(fields, text)
 
     def _emit_if(self, stmt: IfStmt, out: _Builder) -> None:
         if stmt.else_body:
@@ -422,7 +521,11 @@ class _Compiler:
         self.calls.setdefault(out.name, set()).add(stmt.name)
         if out.is_main:
             self.main_calls.append((stmt.name, out.tool, out.coord))
-        out.add(action=20000, flag=-1, module=str(self.modules[stmt.name]))
+        flag = out.flag_of(stmt.goto) if stmt.goto is not None else -1
+        # Con salto, el pad guarda el número de la etiqueta como texto
+        # (`"0"`, visto 3 veces con la etiqueta 0); sin salto, -1 (entero).
+        out.add(action=20000, flag=str(flag) if stmt.goto is not None else -1,
+                module=str(self.modules[stmt.name]))
 
     def _emit_proc(self, stmt: ProcDecl) -> None:
         if stmt.params:
@@ -433,6 +536,7 @@ class _Compiler:
         # Los POINT declarados adentro del PROC son locales: se restauran al salir.
         outer_points = dict(self.points)
         body = _Builder(stmt.name, self.options.tool, self.options.coord)
+        _prescan_labels(stmt.body, body)
         if self.options.tool or self.options.coord:
             # Como los módulos del respaldo real que usan otro sistema.
             body.add(action=800, coordID=self.options.coord)
@@ -470,6 +574,54 @@ class _Compiler:
                     f"({defaults[0]}/{defaults[1]}), no con los que el principal tenía al "
                     f"llamarlo ({tool}/{coord}). Si tiene que usar otros, poné TOOL/COORD "
                     f"adentro del PROC.")
+
+
+_NBSP = "&nbsp;"
+# `Cmd Set:Stop`: lo único del 53000 que se vio (una vez, al principio del principal).
+_CMD_STOP = dict(addr=98304, data=2561, op=0, specialType=1, type=0, typeSel=1)
+
+
+def _prescan_labels(statements: list, out: _Builder) -> None:
+    """Pasada previa: número de cada etiqueta del usuario, para que un salto
+    hacia adelante (y el texto de un IF desactivado) ya sepan adónde van.
+    Las que traen número lo conservan; las otras toman uno libre."""
+    found: list[LabelStmt] = []
+
+    def walk(stmts: list) -> None:
+        for stmt in stmts:
+            if isinstance(stmt, LabelStmt):
+                found.append(stmt)
+            elif isinstance(stmt, IfStmt):
+                walk(stmt.then_body)
+                walk(stmt.else_body)
+
+    walk(statements)
+    used: set[int] = set()
+    for stmt in found:
+        if stmt.name in out.label_flags or (stmt.number is not None and stmt.number in used):
+            what = (f"la etiqueta {stmt.name!r} está declarada más de una vez"
+                    if stmt.name in out.label_flags
+                    else f"el número {stmt.number} de la etiqueta {stmt.name!r} ya lo usa otra")
+            raise with_line(CompileError(what), stmt)
+        out.label_text[stmt.name] = stmt.pad_name if stmt.pad_name is not None else stmt.name
+        if stmt.number is not None:
+            used.add(stmt.number)
+            out.label_flags[stmt.name] = stmt.number
+        else:
+            out.label_flags[stmt.name] = -1
+    free = 0
+    for stmt in found:
+        if out.label_flags[stmt.name] == -1:
+            while free in used:
+                free += 1
+            used.add(free)
+            out.label_flags[stmt.name] = free
+    out.reserved_flags = used
+
+
+def _collect_pad_names(statements: list) -> dict[str, str]:
+    return {s.name: (s.pad_name if s.pad_name is not None else s.name)
+            for s in statements if isinstance(s, ProcDecl)}
 
 
 def _collect_modules(statements: list) -> dict[str, int]:
@@ -522,18 +674,25 @@ def compile_to_pad_report(source: str, options: PadOptions | None = None) -> tup
     ast = build_ast(source)
     compiler = _Compiler(options, modules=_collect_modules(ast.statements))
     main = _Builder("MAIN", options.tool, options.coord)
-    main.add(action=50000, comment="Generado por Borunte DSL")
+    _prescan_labels(ast.statements, main)
+    # El comentario de arriba del principal es nuestro, salvo que el programa
+    # traiga el suyo (uno importado de un respaldo del pad).
+    first = next((st for st in ast.statements if not isinstance(st, (PointDecl, ProcDecl))), None)
+    if not isinstance(first, CommentStmt):
+        main.add(action=50000, comment="Generado por Borunte DSL")
     compiler.emit_block(ast.statements, main)
     main.add(action=60000)
     compiler.check_calls(main)
 
-    modules = [Module(id=i, name=name, actions=compiler.bodies[name])
+    pad_names = _collect_pad_names(ast.statements)
+    modules = [Module(id=i, name=pad_names[name], actions=compiler.bodies[name])
                for name, i in compiler.modules.items()]
 
     lines = [list(_EMPTY_PROGRAM) for _ in range(_ACT_LINE_COUNT)]
     lines[_UNKNOWN_LINE_10] = {}
     others = {ext: b"" for ext in _EMPTY_FILES}
-    others["fnc"] = (options.template.others.get("fnc") if options.template is not None
+    others["fnc"] = (options.fnc if options.fnc is not None
+                     else options.template.others.get("fnc") if options.template is not None
                      and options.template.others.get("fnc") else TEMPLATE_FNC.read_bytes())
 
     act = ActFile(lines)
