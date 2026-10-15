@@ -22,6 +22,12 @@ Leer primero `docs/ARCHITECTURE.md` y `docs/PAD_FORMAT.md`.
 - [x] Cliente Modbus del robot (`comms/robot_client.py`) para digitalizar puntos
 - [x] GUI (PySide6) con "Exportar para el pad" (Ctrl+E)
 - [x] Guía del lenguaje: `docs/LENGUAJE.md` (cada ejemplo lo compila un test)
+- [x] **Importar un respaldo del pad** como `.src` + `.dat` (Archivo → Importar
+      respaldo del pad…, Ctrl+I) y volver a exportarlo igual: el lenguaje
+      expresa suavizado, demora, salida por distancia, etiquetas y saltos,
+      acciones desactivadas, comentarios y nombres del pad. Con un programa de
+      1032 acciones da idéntico y coincide con el listado del propio pad. Ver
+      `docs/ARCHITECTURE.md`
 - [x] Programa en `.src` (lógica) + `.dat` (puntos) + `config.dat` (puntos
       comunes de la carpeta), como en KUKA; los `.krlb` de antes siguen
       andando. Ver `docs/ARCHITECTURE.md`

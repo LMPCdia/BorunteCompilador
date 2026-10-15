@@ -74,6 +74,17 @@ Un punto del `.dat` que el `.src` no usa es solo un **aviso** (los de `config.da
 
 Un programa de **un solo archivo** (`.krlb`, lo de antes) sigue andando igual: ahí los `POINT` van donde estén. En la interfaz, *Archivo → Separar en .src y .dat* lo convierte.
 
+### Importar un respaldo del pad
+
+Un respaldo exportado del pad (`HCBackupRobot_*.zip`) se puede abrir como programa y seguir editándolo:
+
+- **Interfaz:** *Archivo → Importar respaldo del pad…* (Ctrl+I). Si al lado del `.zip` hay un `<programa>.html` (el listado que exporta el pad), se anotan como comentarios los nombres de las herramientas y los sistemas de coordenadas.
+- **Consola:** `python -m compiler.pad_import RESPALDO.zip --out carpeta --check`.
+
+Salen el `.src` (un `PROC` por módulo y el programa principal), el `.dat` con todos los puntos (con los nombres que tienen en el pad) y el `.fnc` (la configuración del robot, que viaja junto al `.src` y se usa al exportar). `--check` vuelve a compilar y compara con el respaldo original acción por acción. En el programa de producción de 1032 acciones con que se probó, el resultado es **idéntico** (salvo el numerado interno), el listado del pad coincide y la simulación da lo mismo. Lo que el lenguaje no pueda expresar se avisa y queda como `; NO IMPORTADO: …`.
+
+Los **valores** de las herramientas y los sistemas de coordenadas no están en el respaldo: viven en el pad. El programa solo guarda el número.
+
 ## 3. Reglas básicas
 
 - Una sentencia por línea. No hay separador ni punto y coma final.
@@ -184,6 +195,22 @@ ENDPROC
 ir()
 ```
 
+### Nombres que muestra el pad: `AS`
+
+El pad acepta nombres como `Entrada/SalidaP1-1` o `MesaIzqReja.90M`, que no son identificadores. `AS "texto"` guarda el nombre del pad en un `POINT`, un `PROC` o una etiqueta; sin `AS` se usa el nombre. Un punto con `AS ""` queda sin nombre en el pad.
+
+```krl
+POINT p1 = JOINT(0, 0, 0, 0, -90, 0) AS "Entrada/SalidaP1-1"
+POINT p2 = JOINT(1, 0, 0, 0, -90, 0) AS ""
+
+PROC Mesa_90M() AS "Mesa.90M"
+    MOVEJ p1 SPEED 50
+    MOVEJ p2 SPEED 50
+ENDPROC
+
+Mesa_90M()
+```
+
 ## 5. Movimientos
 
 ```text
@@ -216,6 +243,51 @@ El pad guarda para `MOVEJ` ángulos de eje y para `MOVEL` coordenadas cartesiana
 Los movimientos son **bloqueantes**: la línea siguiente no arranca hasta que el robot llegó. No hace falta esperar explícitamente.
 
 > ⚠️ **Deducido, no confirmado.** Que la acción `4` del pad sea `MOVEJ` (valores = ángulos de eje) y la `10` sea `MOVEL` (valores = X, Y, Z, U, V, W) se dedujo del respaldo real. Si estuviera al revés, el robot haría trayectorias distintas de las escritas. **Probar cada programa nuevo a velocidad baja.**
+
+### Opciones de un movimiento
+
+Después de `SPEED` se pueden poner estas opciones (todas vistas en un respaldo real del pad, y en el listado del pad con sus nombres):
+
+| Opción | Qué hace |
+|---|---|
+| `SMOOTH n` | suavizado de 0 a 9 (`Smooth` del pad) |
+| `DELAY s` | demora propia del movimiento, de 0 a 3600 s (distinta de `WAIT`) |
+| `TOOL n` / `COORD n` | herramienta y sistema de **este** movimiento, sin cambiar los vigentes |
+| `NEAR_END Ynnn ON\|OFF mm` | al llegar a `mm` del **punto final**, la salida pasa a ON / OFF |
+| `AWAY_START Ynnn ON\|OFF mm` | al alejarse más de `mm` del **punto inicial**, la salida pasa a ON / OFF |
+| `… DISABLED` (al final de la anterior) | la salida por distancia está armada pero apagada |
+
+La salida por distancia es la forma de prender y apagar el arco en la soldadura. Cada movimiento tiene **una** sola.
+
+```krl
+POINT p_a = JOINT(0, 0, 0, 0, -90, 0)
+POINT p_b = WORLD(500, 0, 400, 180, 0, 180)
+POINT p_c = WORLD(500, 100, 400, 180, 0, 180)
+
+PROC soldar()
+    COORD 1
+    TOOL 2
+    MOVEJ p_a SPEED 100 SMOOTH 4
+    MOVEL p_b SPEED 25 NEAR_END Y034 ON 1
+    MOVEL p_c SPEED 5 DELAY 0.5 COORD 0 AWAY_START Y034 OFF 2.5
+ENDPROC
+
+soldar()
+```
+
+```krl-error
+; ERROR: SMOOTH 10: tiene que ser un número entero entre 0 y 9
+POINT p = JOINT(0, 0, 0, 0, -90, 0)
+MOVEJ p SPEED 10 SMOOTH 10
+```
+
+```krl-error
+; ERROR: repetido en el mismo movimiento
+POINT p = WORLD(500, 0, 400, 180, 0, 180)
+MOVEL p SPEED 10 NEAR_END Y034 ON 1 AWAY_START Y034 OFF 2
+```
+
+> ⚠️ **Deducido del texto del pad, no probado en el robot.** Cómo se codifica la salida por distancia (`bindIOInfo`, ver `docs/PAD_FORMAT.md`) salió de cruzar 327 movimientos con el texto que el pad muestra para cada uno (`whiledistanceend point … then 1.000mm then output Y034 on`). Qué hace exactamente el robot con eso, sin probar.
 
 ## 6. Entradas y salidas
 
@@ -401,6 +473,85 @@ revisar()
 
 (La última es la sintaxis de una versión vieja de esta guía: `INPUT(...)` no existe.)
 
+### Etiquetas y saltos
+
+```text
+LABEL nombre [número] [AS "nombre del pad"]     una etiqueta
+IF Xnnn == 1 GOTO nombre                        salta si la entrada está ON
+mi_proc() THEN GOTO nombre                      llama al PROC y después salta
+```
+
+Esta es la forma del `IF` que usa el pad (`IF:X030ON … Go to Flag[1]`, 44 casos en el respaldo real). El número de la etiqueta es el que guarda el pad (único dentro de cada `PROC` o del principal); sin número se asigna uno libre. Las etiquetas valen **dentro** de cada `PROC` o del principal. Con `THEN GOTO`, el pad guarda el número de la etiqueta como texto (se vio con la etiqueta 0).
+
+```krl
+POINT p = JOINT(0, 0, 0, 0, -90, 0)
+
+PROC mover()
+    MOVEJ p SPEED 10
+ENDPROC
+
+mover()
+IF X030 == 1 GOTO rama_b
+mover() THEN GOTO salida
+LABEL rama_b 1
+mover()
+LABEL salida 0
+```
+
+La VM de la PC no ejecuta etiquetas ni saltos (da un aviso claro): el programa se compila para el pad, se exporta y se **simula** (F9) igual.
+
+```krl-pad-only
+LABEL fin
+IF X010 == 1 GOTO fin
+```
+
+`IF Xnnn == 0 GOTO` («saltar si está OFF») nunca se vio en un respaldo real:
+
+```krl-unverified
+LABEL fin
+IF X010 == 0 GOTO fin
+```
+
+```krl-error
+; ERROR: La etiqueta 'nada' no está definida en el programa principal
+IF X010 == 1 GOTO nada
+```
+
+```krl-error
+; ERROR: el número 1 de la etiqueta 'b' ya lo usa otra
+LABEL a 1
+LABEL b 1
+```
+
+> ⚠️ Los saltos **hacia atrás** (una etiqueta antes del `IF … GOTO`) arman un bucle. En el respaldo real no se vio ninguno: probar a velocidad baja.
+
+### Acciones desactivadas, comentarios y `CMD STOP`
+
+```krl
+LABEL fin2 0
+
+PROC p()
+    SET_OUT(Y034, ON)
+    DISABLED SET_OUT(Y034, OFF)
+    DISABLED IF X012 == 1 GOTO fin2
+    LABEL fin2 0
+ENDPROC
+
+COMMENT "PROGRAMA DE PRUEBA"
+CMD STOP
+p()
+```
+
+- `DISABLED <acción>`: una acción que en el pad está desactivada (comentada, pero con su contenido, para volver a activarla). **Solo** `SET_OUT` e `IF … GOTO`: es lo único que se vio desactivado (167 casos).
+- `COMMENT "texto"`: un comentario del pad (aparece como instrucción en el programa), distinto de `;`, que es un comentario del archivo y no llega al pad. Si el programa empieza con un `COMMENT`, no se agrega el comentario «Generado por Borunte DSL».
+- `CMD STOP`: lo que el pad muestra como `Cmd Set:Stop` (se vio una vez, al principio del principal). Qué hace en el robot: no se sabe.
+
+```krl-error
+; ERROR: «MOVEJ» no va acá
+POINT p = JOINT(0, 0, 0, 0, -90, 0)
+DISABLED MOVEJ p SPEED 10
+```
+
 ### ⚠️ No hay `ELSE`
 
 ```krl-error
@@ -417,11 +568,11 @@ revisar()
 
 **Por qué:** el `IF` del pad solo sabe saltar hacia adelante cuando la condición se cumple. Para saltear una segunda rama haría falta un salto incondicional, y en el respaldo real no hay ninguno. Generar algo aproximado sería inventar comportamiento del robot.
 
-**Cómo se escribe entonces:** dos `IF` con condiciones opuestas (el segundo necesita `== 1`, que está sin confirmar; ver arriba). Ojo: no es exactamente equivalente si el cuerpo del primero cambia la entrada.
+**Cómo se escribe entonces:** dos `IF` con condiciones opuestas (el segundo necesita `== 1`, que está sin confirmar; ver arriba), o con saltos: `IF Xnnn == 1 GOTO rama_b`, la rama «apagada» a continuación y la «encendida» después de `LABEL rama_b` (sin un salto incondicional, la primera sigue de largo hacia la segunda: `mi_proc() THEN GOTO` llama a un módulo y después salta). Ojo: no es exactamente equivalente si el cuerpo del primero cambia la entrada.
 
 ### No hay bucles
 
-Ni `WHILE` ni `FOR`, en ningún destino. Para repetir se repite el código o se llama varias veces a un `PROC`.
+Ni `WHILE` ni `FOR`, en ningún destino. Para repetir se repite el código o se llama varias veces a un `PROC` (o, en el pad, un salto hacia atrás con una etiqueta: ver arriba).
 
 ### Variables, solo en la VM de la PC
 
@@ -537,6 +688,13 @@ Verificada ejecutando el compilador sobre cada construcción.
 | `PROC()` sin parámetros + llamada del principal | ✅ | ✅ |
 | `PROC` con parámetros | ❌ error | ✅ |
 | `PROC` que llama a otro `PROC` | ⚠️ solo «sin confirmar» | ✅ |
+| `SMOOTH`, `DELAY`, `TOOL`/`COORD` y `NEAR_END`/`AWAY_START` en un movimiento | ✅ | ✅ (se ignoran) |
+| `LABEL`, `IF Xnnn == 1 GOTO`, `P() THEN GOTO` | ✅ | ❌ `PadOnlyError`: los ejecuta el pad |
+| `IF Xnnn == 0 GOTO` | ⚠️ solo «sin confirmar» | ❌ `PadOnlyError` |
+| `DISABLED SET_OUT` / `DISABLED IF … GOTO` | ✅ | ✅ (se ignora) |
+| `DISABLED` sobre otra cosa | ❌ error | ❌ error |
+| `COMMENT`, `CMD STOP` | ✅ | ✅ (se ignoran) |
+| `AS "nombre"` en `POINT`, `PROC` y `LABEL` | ✅ | ✅ (se ignora) |
 | `.src` + `.dat` + `config.dat` | ✅ | ✅ |
 
 Todo lo marcado ❌ falla al compilar con un mensaje que explica el motivo. Nunca genera algo aproximado.
@@ -561,6 +719,10 @@ python -m gui.app
 Ejecuta el respaldo del pad sobre el modelo cinemático del robot (el BRTIRUS1510A de la celda, y los de la biblioteca de Drive). Avisa ejes fuera de rango, puntos inalcanzables y singularidades, estima el tiempo de ciclo, busca **choques** del brazo y la herramienta contra las piezas de la celda, el piso y el propio brazo, y dibuja gráficas de ejes y de la punta. El robot se puede correr y girar dentro de la celda (pedestal, pared, techo); los puntos del programa siguen siendo respecto de su base.
 
 > ⚠️ Es un modelo: el rango y el sentido de giro de cada eje, el cero de la muñeca y la convención de los ángulos `U, V, W` (se supone R = Rz(W)·Ry(V)·Rx(U)) son **hipótesis** hasta contrastarlas con el robot real. El perfil de aceleración también es un supuesto: el respaldo no trae la del controlador.
+
+### Importar un respaldo del pad
+
+*Archivo → Importar respaldo del pad…* (Ctrl+I) o `python -m compiler.pad_import RESPALDO.zip --out carpeta --check` (sección 2). Después se edita el `.src` / `.dat`, se guarda (`.src`, `.dat` y `.fnc`) y se exporta con Ctrl+E: el respaldo sale con el `.fnc` del programa original.
 
 ### Desde Python
 
@@ -591,6 +753,8 @@ Para la VM de la PC: `compiler.codegen.compile_source(texto)` (o `program_files.
 python -m sim.check paletizado.src                       # simula un .src, un .krlb o un respaldo .zip
 python -m sim.check HCBackupRobot_*.zip --model BRTIRUS1510A --input X012=1
 python -m pad.listing HCBackupRobot_*.zip                # lista legible de un respaldo
+python -m compiler.pad_import HCBackupRobot_*.zip --out carpeta --check   # respaldo -> .src/.dat
+python -m pad.pad_html HCBackupRobot_*.zip Programa.html # cruza el respaldo con el listado del pad
 ```
 
 ## 13. Programa completo de ejemplo
@@ -653,6 +817,12 @@ ir_a_home()
 | `falta cerrar un paréntesis «)» en «PROC x(id=1)»` | `PROC` no lleva `id` |
 | `solo el programa principal llama módulos` | Un `PROC` llama a otro: sección 10 |
 | `TOOL dentro de un IF no se puede exportar` | Sacalo del `IF` |
+| `La etiqueta 'x' no está definida en …` | `GOTO` a una etiqueta que no está en el mismo `PROC` (o en el principal) |
+| `la etiqueta 'x' está declarada más de una vez` / `el número N … ya lo usa otra` | Etiquetas repetidas en el mismo `PROC` |
+| `SMOOTH n: tiene que ser un número entero entre 0 y 9` | Opción de movimiento fuera de rango |
+| `… repetido en el mismo movimiento` | Dos `SMOOTH`, o dos salidas por distancia, en un movimiento |
+| `Las etiquetas y los saltos … los ejecuta el pad` | F7 compila para la VM de la PC, que no ejecuta saltos: exportá (Ctrl+E) o simulá (F9) |
+| `«MOVEJ» no va acá` (después de `DISABLED`) | `DISABLED` solo acepta `SET_OUT` e `IF … GOTO`: es lo único que se vio desactivado |
 | `un .dat solo tiene puntos (POINT)` | Pusiste otra cosa en un `.dat` |
 | `el punto p se declara en p.dat…` | Un `POINT` en el `.src` |
 | `Unexpected token …` / `no se esperaba …` | Error de sintaxis. Lo más común: palabra clave en minúscula, falta `ENDIF` o `ENDPROC`, o una coma decimal |
@@ -686,8 +856,16 @@ SENTENCIAS
   IF X<nnn> == 0 THEN ... ENDIF      cuerpo si la entrada está APAGADA
   PROC <nombre>() ... ENDPROC        sin parámetros, sin id, en el nivel superior
 
+  Opciones de MOVEJ/MOVEL, después de SPEED:
+    SMOOTH 0..9   DELAY <s>   TOOL <n>   COORD <n>   (estos dos: solo ese movimiento)
+    NEAR_END|AWAY_START Y<nnn> ON|OFF <mm>  [DISABLED]   una salida según la distancia
+  Saltos del pad (la VM de la PC no los ejecuta):
+    LABEL <nombre> [<número>]      IF X<nnn> == 1 GOTO <nombre>      <proc>() THEN GOTO <nombre>
+  Otros:  DISABLED SET_OUT(...) | DISABLED IF ... GOTO ...      COMMENT "texto"      CMD STOP
+  Nombres del pad:  POINT/PROC/LABEL ... AS "Entrada/SalidaP1-1"
+
 NO EXISTE EN EL PAD (falla al compilar, a propósito)
-  ELSE            -> dos IF (el segundo con == 1, sin confirmar)
+  ELSE            -> dos IF (el segundo con == 1, sin confirmar) o saltos con etiquetas
   WHILE / FOR     -> repetir código o llamar varias veces
   VAR / asignar   -> solo en la VM de la PC
   WAIT_IN         -> IF Xnnn == 0
@@ -695,26 +873,30 @@ NO EXISTE EN EL PAD (falla al compilar, a propósito)
   PROC con parámetros, PROC con id, PROC que llama a otro PROC (sin confirmar)
 
 SIN CONFIRMAR CONTRA EL PAD
-  que el pad acepte un respaldo generado por este compilador; cuál acción
-  es MOVEJ y cuál MOVEL; que WAIT sea la espera temporizada; la numeración
-  octal de E/S; IF Xnnn == 1; un módulo que llama a otro.
+  que el pad acepte un respaldo generado por este compilador (lo que escribe
+  es idéntico a un respaldo real: ver sección 2); IF Xnnn == 1 y == 0 GOTO;
+  un módulo que llama a otro; saltos hacia atrás; qué hace el robot con CMD STOP
+  y con la salida por distancia.
 ```
 
 ## 16. Qué está confirmado y qué no
 
-**Nada de lo que genera este compilador se probó importándolo a un pad real.** El formato del respaldo se dedujo de un único export de producción (programa de soldadura de 9 módulos, ~1100 acciones, agosto 2026). Que `pad/backup.py` lea y reescriba ese respaldo **byte a byte** prueba que entendimos el archivo, no que el pad acepte lo que escribimos.
+**Nada de lo que genera este compilador se probó importándolo a un pad real.** El formato del respaldo se dedujo de un único programa de producción (9 módulos, 1032 acciones) y de su listado HTML del pad, que lo describe con las palabras del propio pad. Que `pad/backup.py` lea y reescriba ese respaldo **byte a byte**, que el importador lo convierta en `.src`/`.dat` y el compilador lo vuelva a generar **idéntico**, y que el respaldo regenerado coincida con el listado del pad (1032 de 1032 entradas), prueba que entendimos el archivo y que escribimos lo mismo, **no** que el pad acepte lo que escribimos.
 
 | Cosa | Grado | Nota |
 |---|---|---|
 | Contenedor del zip, `.act` en una línea JSON por bloque | Verificado | Round-trip byte a byte |
-| `MOVEJ` = acción 4 (ejes), `MOVEL` = acción 10 (cartesiano) | Deducido | Encaja con todos los casos del respaldo |
-| `SET_OUT`, `TOOL`, `COORD`, `CALL`, fin de módulo | Deducido | |
-| `IF Xnnn == 0` | Deducido | 44 casos |
-| `IF Xnnn == 1` | **Sin confirmar** | Nunca visto; solo con «sin confirmar» |
+| `MOVEJ` = acción 4 (ejes), `MOVEL` = acción 10 (cartesiano) | Visto en el listado del pad | `Free Path` y `Line3D-Pose` |
+| `SET_OUT`, `TOOL`, `COORD`, `CALL`, etiquetas, fin de módulo | Visto en el listado del pad | `Output:`, `Switch Tool`, `Switch Coord`, `Call Fun`, `Flag[n]` |
+| `IF Xnnn == 1 GOTO` (y `== 0 THEN`, que es el mismo salto) | Visto en el listado del pad | 44 casos, `IF:X030ON … Go to Flag[1]` |
+| `IF Xnnn == 1 THEN` / `== 0 GOTO` | **Sin confirmar** | Nunca visto; solo con «sin confirmar» |
 | Un módulo que llama a otro | **Sin confirmar** | Nunca visto; solo con «sin confirmar» |
-| `WAIT n s` = acción 100 | **Hipótesis** | Pocos casos |
-| Numeración octal de E/S | **Hipótesis** | 3 casos |
-| `smooth`, `bindIOInfo`, `distance` | Desconocido | Se copian tal cual |
+| `WAIT n s` = acción 100 | Visto en el listado del pad | `DLY:0.300s` (163 casos); que el robot espere: sin probar |
+| `SMOOTH`, `DELAY` del movimiento | Visto en el listado del pad | `Smooth:`, `DLY` |
+| Salida por distancia (`bindIOInfo`, `distance`) | Deducido del texto del pad | 327 movimientos; falta el bit `0x40` |
+| Numeración octal de E/S | Deducido | 6 puntos distintos, 65 usos |
+| `CMD STOP` | Visto en el listado del pad | `Cmd Set:Stop`; qué hace: no se sabe |
+| Acciones desactivadas | Visto | 167 casos, de dos tipos |
 | Valores de herramientas y sistemas | Se cargan en el pad | El programa solo guarda el número |
 
 La lista ordenada de qué probar primero en el pad está en `docs/PAD_FORMAT.md` («Para confirmar con el pad»). Lo primero: importar un respaldo **reescrito sin cambios** por `pad/backup.py`; después uno generado, **a velocidad baja**.

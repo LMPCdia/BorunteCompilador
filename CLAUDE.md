@@ -61,6 +61,13 @@ respaldo real; la lógica se prueba contra `comms/robot_simulator.py`.
   sin POINT) + `<nombre>.dat` (solo POINT) + `config.dat` (puntos comunes de
   la carpeta); se juntan para compilar y los errores dicen archivo y línea.
   Un `.krlb` (todo junto) sigue andando. El respaldo del pad no cambia.
+- **`compiler/pad_import.py`**: respaldo del pad -> `.src` + `.dat` (+ `.fnc`),
+  con ida y vuelta exacta (`compare`). El lenguaje tiene opciones de
+  movimiento (`SMOOTH`, `DELAY`, `TOOL`/`COORD`, `NEAR_END`/`AWAY_START`),
+  `LABEL`/`IF … GOTO`/`THEN GOTO`, `DISABLED`, `COMMENT`, `CMD STOP` y `AS`.
+  `pad/pad_html.py` cruza un respaldo con el listado HTML del pad;
+  `pad/bindio.py` decodifica `bindIOInfo` (salida por distancia). Las
+  etiquetas y los saltos los ejecuta el pad: la VM da `PadOnlyError`.
 - **`compiler/codegen.py` + `runtime/vm.py`**: bytecode y VM de referencia,
   solo para simular la lógica en la PC.
 - **`comms/robot_client.py`**: Modbus del robot, para digitalizar puntos y

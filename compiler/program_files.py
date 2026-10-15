@@ -64,6 +64,9 @@ class ProgramSources:
     src: SourceFile
     dat: SourceFile | None = None
     config: SourceFile | None = None
+    # `.fnc` del programa (configuración del robot), en bytes: el de un
+    # respaldo importado del pad. Viaja como `<nombre>.fnc` junto al .src.
+    fnc: bytes | None = None
 
     @property
     def split(self) -> bool:
@@ -92,7 +95,7 @@ class Combined:
 
     def remap_error(self, error: CompileError) -> CompileError:
         where = self.locate(error.line)
-        out = CompileError(self.remap(str(error)), line=where[1] if where else error.line)
+        out = error.__class__(self.remap(str(error)), line=where[1] if where else error.line)
         out.file = where[0] if where else None
         return out
 
@@ -105,6 +108,10 @@ def paths_for(src_path: str | Path) -> tuple[Path, Path, Path]:
     p = Path(src_path)
     src = p.with_suffix(SRC_SUFFIX)
     return src, src.with_suffix(DAT_SUFFIX), src.parent / CONFIG_DAT
+
+
+def fnc_path(src_path: str | Path) -> Path:
+    return Path(src_path).with_suffix(".fnc")
 
 
 def load(path: str | Path) -> ProgramSources:
@@ -121,8 +128,10 @@ def load(path: str | Path) -> ProgramSources:
 
     if not src.exists():
         raise FileNotFoundError(f"No existe {src.name} (el programa de {p.name})")
+    fnc = fnc_path(src)
     return ProgramSources(SourceFile(src.name, read(src)), SourceFile(dat.name, read(dat)),
-                          SourceFile(CONFIG_DAT, read(config)))
+                          SourceFile(CONFIG_DAT, read(config)),
+                          fnc=fnc.read_bytes() if fnc.exists() else None)
 
 
 def save(sources: ProgramSources, src_path: str | Path, write_config: bool = True) -> list[Path]:
@@ -137,6 +146,9 @@ def save(sources: ProgramSources, src_path: str | Path, write_config: bool = Tru
     if write_config and sources.config is not None and (sources.config.text.strip() or config.exists()):
         config.write_text(sources.config.text, encoding="utf-8")
         written.append(config)
+    if sources.fnc is not None:
+        fnc_path(src).write_bytes(sources.fnc)
+        written.append(fnc_path(src))
     return written
 
 
@@ -262,10 +274,15 @@ def check(sources: ProgramSources) -> list[str]:
 def compile_pad(sources: ProgramSources, options=None):
     """Como `compile_to_pad_report`, con los archivos juntos: (respaldo, avisos)
     con archivo y línea en errores y avisos."""
-    from compiler.pad_codegen import compile_to_pad_report
+    import dataclasses
+
+    from compiler.pad_codegen import PadOptions, compile_to_pad_report
 
     warnings = check(sources)
     combined = combine(sources)
+    if sources.fnc is not None:          # el .fnc del programa, no el del respaldo de ejemplo
+        options = dataclasses.replace(options or PadOptions(),
+                                      fnc=(options.fnc if options and options.fnc else sources.fnc))
     try:
         backup, more = compile_to_pad_report(combined.text, options)
     except CompileError as e:

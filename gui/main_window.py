@@ -48,7 +48,8 @@ from PySide6.QtWidgets import (
 
 from comms.robot_client import Pose
 from compiler import program_files as pf
-from compiler.codegen import CompileError
+from compiler import pad_import
+from compiler.codegen import CompileError, PadOnlyError
 from compiler.pad_codegen import PadOptions
 from gui.connection_panel import ConnectionPanel
 from gui.message_window import MessageWindow
@@ -157,6 +158,9 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.program_tabs, "Programa")
         self._split = True
         self._src_name, self._dat_name = "programa.src", "programa.dat"
+        # `.fnc` del programa (configuración del robot): el de un respaldo del
+        # pad importado, que viaja junto al .src y se usa al exportar.
+        self._fnc: bytes | None = None
         self._combined: pf.Combined | None = None
 
         self.bytecode_view = QPlainTextEdit()
@@ -205,7 +209,8 @@ class MainWindow(QMainWindow):
         if not self._split:
             return pf.ProgramSources(src)
         return pf.ProgramSources(src, pf.SourceFile(self._dat_name, self.dat_editor.toPlainText()),
-                                 pf.SourceFile(pf.CONFIG_DAT, self.config_editor.toPlainText()))
+                                 pf.SourceFile(pf.CONFIG_DAT, self.config_editor.toPlainText()),
+                                 fnc=self._fnc)
 
     def combined_source(self) -> str:
         """El programa entero en un texto (lo que compila el simulador)."""
@@ -214,6 +219,7 @@ class MainWindow(QMainWindow):
     def set_sources(self, sources: pf.ProgramSources) -> None:
         """Muestra un programa: tres archivos, o uno solo (.krlb de antes)."""
         self._split = sources.split
+        self._fnc = sources.fnc
         self._src_name = sources.src.name
         self._dat_name = sources.dat.name if sources.dat else Path(sources.src.name).with_suffix(
             pf.DAT_SUFFIX).name
@@ -358,6 +364,11 @@ class MainWindow(QMainWindow):
         self.act_split.setToolTip("Pasa los POINT de un programa de un solo archivo a su .dat")
         self.act_split.setEnabled(not self._split)
 
+        self.act_import_pad = QAction("&Importar respaldo del pad…", self)
+        self.act_import_pad.setShortcut(QKeySequence("Ctrl+I"))
+        self.act_import_pad.setToolTip(
+            "Abre un HCBackupRobot_*.zip como programa .src + .dat para seguir editándolo")
+
         self.act_quit = QAction("&Salir", self)
         self.act_quit.setShortcut(QKeySequence.StandardKey.Quit)
 
@@ -394,6 +405,7 @@ class MainWindow(QMainWindow):
         m_file.addAction(self.act_open)
         m_file.addAction(self.act_save)
         m_file.addAction(self.act_split)
+        m_file.addAction(self.act_import_pad)
         m_file.addSeparator()
         m_file.addAction(self.act_quit)
 
@@ -452,6 +464,7 @@ class MainWindow(QMainWindow):
         self.act_open.triggered.connect(self._on_open)
         self.act_save.triggered.connect(self._on_save)
         self.act_split.triggered.connect(self.split_program)
+        self.act_import_pad.triggered.connect(self._on_import_pad)
         self.act_quit.triggered.connect(self.close)
         self.act_compile.triggered.connect(self._on_compile)
         self.act_run.triggered.connect(self._on_run)
@@ -559,6 +572,46 @@ class MainWindow(QMainWindow):
         self.program_tabs.setTabText(1, self._dat_name)
         return written
 
+    def _on_import_pad(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Importar respaldo del pad", filter="Respaldo del pad (*.zip);;Todos (*)")
+        if path:
+            self.import_pad_backup(path)
+
+    def import_pad_backup(self, path: str | Path, listing: str | Path | None = None) -> bool:
+        """Abre un respaldo del pad como programa .src + .dat. `listing`: el
+        listado HTML del pad (si hay un `<programa>.html` al lado, se usa solo):
+        anota los nombres de las herramientas y los sistemas."""
+        from pad.backup import PadBackup
+
+        path = Path(path)
+        try:
+            backup = PadBackup.read(path)
+            if listing is None:
+                sibling = path.with_name(f"{backup.name}.html")
+                listing = sibling if sibling.exists() else None
+            text = Path(listing).read_text(encoding="utf-8") if listing else None
+            imported = pad_import.import_backup(backup, path.name, text)
+        except Exception as e:  # noqa: BLE001 — zip roto, otro formato de .act, etc.
+            self.messages.error(f"No se pudo importar {path.name}: {e}", "archivo")
+            self._show_messages_dock()
+            return False
+        self.set_sources(imported.sources)
+        # El nombre del programa en el pad es el del respaldo; «Guardar» propone
+        # ese nombre, en la carpeta del zip.
+        self._current_path = path.with_name(f"{backup.name}.src")
+        self._program = None
+        self.messages.info(
+            f"Importado {path.name}: programa {backup.name}, {imported.actions} acciones, "
+            f"{imported.points} puntos (en el .dat). Guardalo para escribir los archivos "
+            f"(.src, .dat y .fnc).", "archivo")
+        for warning in imported.warnings:
+            self.messages.warning(warning, "importador")
+        if imported.warnings:
+            self._show_messages_dock()
+        self._refresh_action_states()
+        return True
+
     def split_program(self) -> None:
         """Un programa de un solo archivo -> .src (lógica) + .dat (puntos)."""
         if self._split:
@@ -587,6 +640,10 @@ class MainWindow(QMainWindow):
         sources = self.program_sources()
         try:
             program, warnings = pf.compile_vm(sources)
+        except PadOnlyError as e:
+            self._program = None
+            self._compile_pad_only(sources, e)
+            return
         except CompileError as e:
             self._program = None
             self.messages.error(str(e), "compilador")
@@ -615,6 +672,31 @@ class MainWindow(QMainWindow):
         self._warn_about_duplicate_points(program)
         self._refresh_action_states()
         self.tabs.setCurrentWidget(self.bytecode_view)
+
+    def _compile_pad_only(self, sources: pf.ProgramSources, why: CompileError) -> None:
+        """Programa con etiquetas y saltos: la VM de la PC no los ejecuta, pero
+        se puede revisar compilando para el pad (lo que se exporta)."""
+        try:
+            backup, warnings = pf.compile_pad(
+                sources, PadOptions(allow_unverified=self.act_allow_unverified.isChecked()))
+        except CompileError as e:
+            self.messages.error(str(e), "compilador")
+            self._show_messages_dock()
+            self._refresh_action_states()
+            return
+        total = len(backup.act.main) + sum(len(m.actions) for m in backup.act.modules)
+        self.bytecode_view.setPlainText(
+            "Este programa tiene etiquetas y saltos (LABEL, IF … GOTO): los ejecuta el pad, "
+            "no la VM de la PC.\nSe revisó compilando para el pad; se simula con F9 y se "
+            "exporta con Ctrl+E.")
+        self.pad_view.setPlainText("\n".join(list_backup(backup)))
+        for warning in warnings:
+            self.messages.warning(warning, "compilador")
+        self.messages.info(
+            f"Compilado para el pad: {total} acciones, {len(backup.act.modules)} módulos. "
+            f"La VM de la PC no ejecuta etiquetas ni saltos (F5 no está disponible); "
+            f"simulá con F9.", "compilador")
+        self._refresh_action_states()
 
     def _warn_about_duplicate_points(self, program: Program) -> None:
         """La tabla de puntos no se deduplica: cada MOVEJ/MOVEL agrega una

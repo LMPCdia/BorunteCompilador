@@ -7,6 +7,7 @@ contra el compilador de verdad.
                       `; ERROR: <texto>`, es un trozo del mensaje
     ```krl-unverified compila para el pad SOLO con allow_unverified
     ```krl-vm         compila para la VM de la PC y NO para el pad
+    ```krl-pad-only   compila para el pad; la VM de la PC da PadOnlyError (saltos)
     ```krl-src / krl-dat / krl-config
                       los archivos de un mismo programa (juntos, seguidos);
                       con `; ERROR: <texto>` en alguno, tiene que fallar así
@@ -64,11 +65,12 @@ PLAIN = [b for b in blocks() if b[0] == "krl"]
 ERRORS = [b for b in blocks() if b[0] == "krl-error"]
 UNVERIFIED = [b for b in blocks() if b[0] == "krl-unverified"]
 VM = [b for b in blocks() if b[0] == "krl-vm"]
+PAD_ONLY = [b for b in blocks() if b[0] == "krl-pad-only"]
 
 
 def test_the_guide_has_examples_of_every_kind():
     assert len(PLAIN) >= 10 and len(ERRORS) >= 20
-    assert UNVERIFIED and VM and groups()
+    assert UNVERIFIED and VM and PAD_ONLY and groups()
 
 
 @pytest.mark.parametrize("block", PLAIN, ids=_id)
@@ -102,6 +104,16 @@ def test_vm_blocks_compile_for_the_vm_but_not_for_the_pad(block):
     compile_source(body)
     with pytest.raises(CompileError):
         compile_to_pad_report(body, PadOptions())
+
+
+@pytest.mark.parametrize("block", PAD_ONLY, ids=_id)
+def test_pad_only_blocks_compile_for_the_pad_but_the_vm_says_so(block):
+    from compiler.codegen import PadOnlyError
+
+    _tag, body, _line = block
+    compile_to_pad_report(body, PadOptions())
+    with pytest.raises(PadOnlyError):
+        compile_source(body)
 
 
 @pytest.mark.parametrize("group", groups(), ids=lambda g: f"línea {g[0][2]}")

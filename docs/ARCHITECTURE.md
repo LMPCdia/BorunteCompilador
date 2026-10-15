@@ -113,3 +113,29 @@ a la carpeta:
   distinto y no se tocó, manda el de la carpeta: lo puede haber cambiado otro
   programa). Los puntos digitalizados (F8) se agregan al final del `.dat`.
 - `python -m sim.check paletizado.src` simula el programa con sus `.dat`.
+
+## Respaldo del pad -> programa (`compiler/pad_import.py`)
+
+El camino de vuelta: un respaldo exportado del pad se abre como programa
+`.src` + `.dat` (+ `.fnc`) y se sigue editando.
+
+```
+HCBackupRobot_*.zip ──► pad/backup.py ──► compiler/pad_import.py ──► .src + .dat + .fnc
+                                                    │
+        (opcional) listado HTML del pad ────────────┘  nombres de herramientas y sistemas
+```
+
+- El lenguaje expresa todo lo que trae un respaldo real: opciones de
+  movimiento (`SMOOTH`, `DELAY`, `TOOL`/`COORD` propios, salida por distancia),
+  etiquetas y saltos, acciones desactivadas, comentarios, `CMD STOP` y los
+  nombres del pad (`AS`). Ver `docs/LENGUAJE.md`.
+- **Ida y vuelta exacta**: importar, compilar y comparar con el original
+  (`pad_import.compare`) da el mismo programa, salvo el numerado interno
+  (`insertedIndex`) y un `customName` ausente (equivale a vacío). Probado con
+  un programa de producción de 1032 acciones: idéntico, el listado del pad
+  coincide (`pad/pad_html.py`, 1032 de 1032) y el simulador da lo mismo.
+- Lo que no se puede expresar se avisa y queda como `; NO IMPORTADO: …`; nada
+  se descarta en silencio.
+- Las etiquetas y los saltos los ejecuta el pad: la VM de la PC da
+  `PadOnlyError` (F7 compila entonces para el pad y avisa; se simula con F9).
+- El `.fnc` viaja junto al `.src` y se usa al exportar.
