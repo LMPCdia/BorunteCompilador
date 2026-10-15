@@ -8,7 +8,8 @@ Contiene lo que un colaborador nuevo necesitaría saber antes de tocar código.
 Lenguaje tipo KRL para programar un robot Borunte. El programa se compila a un
 **respaldo del pad** (`HCBackupRobot_<fecha>.zip`) que se importa en el teach
 pendant por pendrive, y lo ejecuta el controlador del robot solo. LEER
-PRIMERO: `docs/ARCHITECTURE.md`, después `docs/PAD_FORMAT.md`,
+PRIMERO: `docs/ARCHITECTURE.md`, después `docs/LENGUAJE.md` (la guía del
+lenguaje, sus ejemplos los compila un test), `docs/PAD_FORMAT.md`,
 `docs/INSTRUCTION_SET.md`, `docs/MODBUS_REGISTER_MAP.md`, `docs/SIMULATION.md`.
 
 **Ya no hay PLC.** Hasta octubre 2026 el plan era una VM en ladder sobre un

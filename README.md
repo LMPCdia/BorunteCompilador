@@ -21,6 +21,7 @@ Leer primero `docs/ARCHITECTURE.md` y `docs/PAD_FORMAT.md`.
       PC, contra el simulador del robot (`comms/robot_simulator.py`)
 - [x] Cliente Modbus del robot (`comms/robot_client.py`) para digitalizar puntos
 - [x] GUI (PySide6) con "Exportar para el pad" (Ctrl+E)
+- [x] Guía del lenguaje: `docs/LENGUAJE.md` (cada ejemplo lo compila un test)
 - [x] Programa en `.src` (lógica) + `.dat` (puntos) + `config.dat` (puntos
       comunes de la carpeta), como en KUKA; los `.krlb` de antes siguen
       andando. Ver `docs/ARCHITECTURE.md`
