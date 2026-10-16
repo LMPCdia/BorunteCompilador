@@ -35,6 +35,7 @@ from dataclasses import dataclass
 
 from sim.meshes import Mesh
 from sim.scene import LayoutObject, base_matrix
+from sim.scene import object_matrix as scene_object_matrix
 
 Vec = tuple[float, float, float]
 SIDES = ("+X", "-X", "+Y", "-Y")
@@ -74,12 +75,15 @@ def _vertices(mesh: Mesh) -> list[Vec]:
 
 def world_box(obj: LayoutObject, mesh: Mesh) -> Box:
     """Caja del mundo de la pieza ubicada (con su giro)."""
-    c, s = math.cos(math.radians(obj.rz)), math.sin(math.radians(obj.rz))
+    # La rotación sale de object_matrix: con los giros en X e Y, el eje Z del
+    # modelo deja de ser el de la celda y una rotación en 2D daría una caja
+    # equivocada (la pieza inclinada es más alta y menos ancha).
+    r = object_matrix(obj)
     xs, ys, zs = [], [], []
     for x, y, z in _vertices(mesh):
-        xs.append(c * x - s * y)
-        ys.append(s * x + c * y)
-        zs.append(z)
+        xs.append(r[0][0] * x + r[0][1] * y + r[0][2] * z)
+        ys.append(r[1][0] * x + r[1][1] * y + r[1][2] * z)
+        zs.append(r[2][0] * x + r[2][1] * y + r[2][2] * z)
     if not xs:
         return Box((obj.x, obj.y, obj.z), (obj.x, obj.y, obj.z))
     return Box((min(xs) + obj.x, min(ys) + obj.y, min(zs) + obj.z),
@@ -189,5 +193,5 @@ def clearance(obj_a: LayoutObject, mesh_a: Mesh, obj_b: LayoutObject, mesh_b: Me
 
 
 def object_matrix(obj: LayoutObject):
-    c, s = math.cos(math.radians(obj.rz)), math.sin(math.radians(obj.rz))
-    return [[c, -s, 0.0, obj.x], [s, c, 0.0, obj.y], [0.0, 0.0, 1.0, obj.z], [0.0, 0.0, 0.0, 1.0]]
+    """Re-exportada de `sim.scene` para no romper a quien la importe de acá."""
+    return scene_object_matrix(obj)

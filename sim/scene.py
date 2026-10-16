@@ -99,7 +99,13 @@ class LayoutObject:
     x: float = 0.0            # mm, en coordenadas de la celda
     y: float = 0.0
     z: float = 0.0
-    rz: float = 0.0           # grados alrededor del eje vertical
+    # Giros en grados sobre los ejes FIJOS de la celda, con la misma convención
+    # que `robot_base` (R = Rz·Ry·Rx, ver `pose_matrix`). Una pieza no siempre
+    # está apoyada y derecha: una mesa inclinada, un soporte en la pared o un
+    # STEP cuyo CAD quedó acostado necesitan los tres.
+    rx: float = 0.0
+    ry: float = 0.0
+    rz: float = 0.0
     color: str = "#9aa4ad"
     # La herramienta trabaja sobre esta pieza (p. ej. la que se suelda): para la
     # herramienta solo cuenta tocarla, no acercarse. El brazo usa el margen igual.
@@ -193,6 +199,18 @@ class Layout:
 def base_matrix(pose: list[float] | None) -> Matrix:
     """Base del robot -> celda."""
     return pose_matrix(*(pose or [0.0] * 6))
+
+
+def object_matrix(obj: LayoutObject) -> Matrix:
+    """Pieza -> celda: dónde queda su origen y cómo está girada.
+
+    Vive acá y no en cada módulo a propósito. Esta matriz se armaba por
+    separado en `sim/placement.py`, `sim/check.py` y `gui/sim_view.py`, las
+    tres con el giro en Z escrito a mano: agregar los giros en X e Y obligaba
+    a acordarse de los tres lugares, y el que se olvidara dibujaba la pieza en
+    una posición y buscaba los choques en otra.
+    """
+    return pose_matrix(obj.x, obj.y, obj.z, obj.rx, obj.ry, obj.rz)
 
 
 

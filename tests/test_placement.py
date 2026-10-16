@@ -139,3 +139,75 @@ def test_placing_without_a_selection_warns(app):
     view = SimView(lambda: "", report=lambda s, m: reports.append((s, m)), enable_3d=False)
     assert not view.apply_placement()
     assert reports and reports[-1][0] == "warning"
+
+
+# --- giros en X e Y, no solo en Z -------------------------------------------
+#
+# Una pieza no siempre está apoyada y derecha: una mesa inclinada, un soporte
+# en la pared o un STEP cuyo CAD quedó acostado necesitan los tres giros.
+
+
+def test_object_matrix_uses_the_same_convention_as_the_robot_base():
+    from sim.kinematics import pose_matrix
+    from sim.scene import object_matrix
+
+    obj = mesa(x=100, y=200, z=300, rx=10, ry=20, rz=30)
+    assert object_matrix(obj) == pose_matrix(100, 200, 300, 10, 20, 30)
+
+
+def test_a_z_only_rotation_is_unchanged():
+    """Regresión: las celdas ya guardadas solo tienen rz, y tienen que quedar
+    exactamente donde estaban."""
+    from sim.scene import object_matrix
+
+    m = object_matrix(mesa(x=1, y=2, z=3, rz=90))
+    assert m[0] == pytest.approx([0.0, -1.0, 0.0, 1.0])
+    assert m[1] == pytest.approx([1.0, 0.0, 0.0, 2.0])
+    assert m[2] == pytest.approx([0.0, 0.0, 1.0, 3.0])
+
+
+def test_world_box_follows_a_tilt_in_x():
+    """Una pieza volteada 90° en X cambia de alto a hondo. Con la rotación en
+    2D que había antes, la caja salía igual que sin girar."""
+    derecha = placement.world_box(mesa(), MESA)
+    assert derecha.size == pytest.approx((1000, 600, 750))
+
+    volteada = placement.world_box(mesa(rx=90), MESA)
+    assert volteada.size == pytest.approx((1000, 750, 600))
+
+
+def test_world_box_follows_a_tilt_in_y():
+    volteada = placement.world_box(mesa(ry=90), MESA)
+    assert volteada.size == pytest.approx((750, 600, 1000))
+
+
+def test_a_tilted_piece_is_taller_than_its_own_height():
+    """45° en X: la diagonal de la cara YZ pasa a ser el alto."""
+    inclinada = placement.world_box(mesa(rx=45), MESA)
+    esperado = (600 + 750) * math.sin(math.radians(45))
+    assert inclinada.size[2] == pytest.approx(esperado, abs=1.0)
+
+
+def test_the_three_rotations_survive_saving_the_cell(tmp_path):
+    from sim.scene import Layout
+
+    ruta = tmp_path / "celda.json"
+    Layout(objects=[mesa(x=1, y=2, z=3, rx=10, ry=20, rz=30)]).save(ruta)
+    obj = Layout.load(ruta).objects[0]
+    assert (obj.rx, obj.ry, obj.rz) == (10, 20, 30)
+
+
+def test_a_cell_saved_before_the_rotations_still_loads(tmp_path):
+    """Una celda guardada con la versión que solo tenía `rz` no trae `rx`/`ry`:
+    tienen que quedar en cero, no romper la carga."""
+    import json
+
+    from sim.scene import Layout
+
+    ruta = tmp_path / "vieja.json"
+    ruta.write_text(json.dumps({
+        "model": "BRTIRUS1510A",
+        "objects": [{"name": "mesa", "path": "mesa.stl", "x": 1, "y": 2, "z": 3, "rz": 90}],
+    }), encoding="utf-8")
+    obj = Layout.load(ruta).objects[0]
+    assert (obj.rx, obj.ry, obj.rz) == (0.0, 0.0, 90)

@@ -62,11 +62,12 @@ from sim import placement
 from sim.motion import MotionCurves, analyze
 from sim.pad_sim import Cancelled, PadSimulator, SimResult, inputs_used
 from sim.scene import Layout, LayoutObject, Timeline, has_real_meshes, robot_link_meshes
+from sim.scene import object_matrix as scene_object_matrix
 
 SLIDER_STEPS = 1000
 FRAME_MS = 33
-OBJECT_COLUMNS = ["Pieza", "X", "Y", "Z", "Giro Z°", "Se trabaja"]
-WORKPIECE_COLUMN = 5
+OBJECT_COLUMNS = ["Pieza", "X", "Y", "Z", "Giro X°", "Giro Y°", "Giro Z°", "Se trabaja"]
+WORKPIECE_COLUMN = 7
 POSE_COLUMNS = ["N°", "X", "Y", "Z", "U", "V", "W"]
 DEFAULT_MODEL = "BRTIRUS1510A"  # el robot de la celda
 # Arranque y frenado de cada movimiento. HIPÓTESIS: el respaldo no trae la
@@ -86,8 +87,9 @@ Reporter = Callable[[str, str], None]  # (severidad "info"|"warning"|"error", me
 
 
 def object_matrix(obj: LayoutObject):
-    r = rot_axis((0, 0, 1), math.radians(obj.rz))
-    return [r[0] + [obj.x], r[1] + [obj.y], r[2] + [obj.z], [0.0, 0.0, 0.0, 1.0]]
+    """Re-exportada de `sim.scene`: la matriz de una pieza se arma en un solo
+    lugar (ver el comentario de `sim.scene.object_matrix`)."""
+    return scene_object_matrix(obj)
 
 
 def parse_pose(text: str) -> list[float]:
@@ -1542,7 +1544,8 @@ class SimView(QWidget):
         self._updating_table = True
         self.objects_table.setRowCount(len(self.layout_data.objects))
         for row, obj in enumerate(self.layout_data.objects):
-            values = [obj.name, _fmt(obj.x), _fmt(obj.y), _fmt(obj.z), _fmt(obj.rz)]
+            values = [obj.name, _fmt(obj.x), _fmt(obj.y), _fmt(obj.z),
+                      _fmt(obj.rx), _fmt(obj.ry), _fmt(obj.rz)]
             for col, value in enumerate(values):
                 self.objects_table.setItem(row, col, QTableWidgetItem(value))
             check = QTableWidgetItem()
@@ -1579,7 +1582,7 @@ class SimView(QWidget):
             obj.workpiece = item.checkState() == Qt.CheckState.Checked
             self._mark_collisions_stale("cambió qué pieza se trabaja")
             return
-        field = ["name", "x", "y", "z", "rz"][item.column()]
+        field = ["name", "x", "y", "z", "rx", "ry", "rz"][item.column()]
         if field == "name":
             obj.name = item.text()
             return

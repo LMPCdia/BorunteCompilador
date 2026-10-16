@@ -12,7 +12,6 @@ Acepta el fuente del DSL (lo compila para el pad) o un respaldo ya exportado.
 from __future__ import annotations
 
 import argparse
-import math
 import sys
 from pathlib import Path
 
@@ -20,10 +19,10 @@ from compiler.codegen import CompileError
 from compiler.pad_codegen import PadOptions, io_point
 from pad.backup import PadBackup
 from sim import collision
-from sim.kinematics import RobotModel, rot_axis
+from sim.kinematics import RobotModel
 from sim.meshes import MeshError, load_mesh
 from sim.pad_sim import SimResult, simulate
-from sim.scene import Layout, has_real_meshes, robot_link_meshes
+from sim.scene import Layout, has_real_meshes, object_matrix, robot_link_meshes
 
 DEFAULT_MODEL = "BRTIRUS1510A"  # el robot de la celda
 
@@ -55,9 +54,8 @@ def check_collisions(result: SimResult, model: RobotModel, layout: Layout) -> li
         except (MeshError, OSError) as e:
             notes.append(f"Choques: «{obj.name}» no se revisa ({e})")
             continue
-        r = rot_axis((0, 0, 1), math.radians(obj.rz))
-        matrix = [r[0] + [obj.x], r[1] + [obj.y], r[2] + [obj.z], [0.0, 0.0, 0.0, 1.0]]
-        obstacles.append(collision.Obstacle(obj.name, mesh, matrix, obj.workpiece))
+        obstacles.append(
+            collision.Obstacle(obj.name, mesh, object_matrix(obj), obj.workpiece))
     tool = None
     if layout.tool_mesh:
         try:

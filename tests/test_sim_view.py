@@ -554,3 +554,40 @@ def test_missing_piece_file_does_not_stop_the_collision_check(app, tmp_path):
     result = view.simulate()
     assert result is not None and view.collisions is not None
     assert any(s == "warning" and "«fantasma» no se revisa" in m for s, m in reports)
+
+
+def test_the_pieces_table_has_the_three_rotations(app, tmp_path):
+    """Antes solo se podía girar en Z: una mesa inclinada o un soporte en la
+    pared no se podían ubicar."""
+    from gui.sim_view import OBJECT_COLUMNS
+
+    assert OBJECT_COLUMNS == ["Pieza", "X", "Y", "Z",
+                              "Giro X°", "Giro Y°", "Giro Z°", "Se trabaja"]
+
+    piece = tmp_path / "mesa.stl"
+    write_stl(box((0, 0, 0), (800, 600, 40)), piece)
+    view = _view(app, "")
+    view.import_object(piece)
+
+    # columnas 4, 5 y 6 = rx, ry, rz
+    view.objects_table.item(0, 4).setText("10")
+    view.objects_table.item(0, 5).setText("20")
+    view.objects_table.item(0, 6).setText("30")
+    obj = view.layout_data.objects[0]
+    assert (obj.rx, obj.ry, obj.rz) == (10, 20, 30)
+
+
+def test_tilting_a_piece_moves_it_in_the_3d_view(app, tmp_path):
+    """La matriz que se dibuja tiene que seguir los giros nuevos, no solo el
+    de Z (se armaba por separado en tres lugares)."""
+    from gui.sim_view import object_matrix
+
+    piece = tmp_path / "mesa.stl"
+    write_stl(box((0, 0, 0), (800, 600, 40)), piece)
+    view = _view(app, "")
+    obj = view.import_object(piece)
+
+    derecha = object_matrix(obj)
+    obj.rx = 90
+    volteada = object_matrix(obj)
+    assert derecha != volteada
