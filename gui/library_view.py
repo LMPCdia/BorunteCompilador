@@ -1,0 +1,321 @@
+"""
+Pestaña "Biblioteca": los modelos 3D de la carpeta de Google Drive
+(`sim/library.py`), clasificados por carpeta, listos para insertar en la
+celda, montar como herramienta o usar como robot.
+
+La red y la importación de robots (un par de minutos) corren en un hilo
+aparte: la interfaz no se congela. Regla aprendida a golpes (CLAUDE.md): un
+QThread no se suelta hasta que terminó (`wait()`), si no Qt crashea.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Callable
+
+from PySide6.QtCore import QSettings, Qt, QThread, Signal
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+from sim import library
+from sim.kinematics import USER_MODELS_DIR, RobotModel
+
+KIND_LABEL = {"robot": "Robot", "herramienta": "Herramienta", "pieza": "Pieza"}
+
+
+class _Task(QThread):
+    done = Signal(object)
+    failed = Signal(str)
+    progress = Signal(str)
+
+    def __init__(self, fn: Callable[[Callable[[str], None]], object]) -> None:
+        super().__init__()
+        self._fn = fn
+
+    def run(self) -> None:  # corre en el hilo
+        try:
+            self.done.emit(self._fn(self.progress.emit))
+        except Exception as e:  # noqa: BLE001 — todo error llega a la interfaz
+            self.failed.emit(str(e) or repr(e))
+
+
+class LibraryPanel(QWidget):
+    def __init__(self, on_insert: Callable[[Path, library.Item], None],
+                 on_tool: Callable[[Path, library.Item], None],
+                 on_robot: Callable[[str], None], report: Callable[[str, str], None],
+                 settings: QSettings,
+                 on_catalog: Callable[[library.Catalog], None] | None = None,
+                 on_progress: Callable[[str, str | None, str], None] | None = None) -> None:
+        super().__init__()
+        self._on_insert, self._on_tool, self._on_robot = on_insert, on_tool, on_robot
+        self._on_catalog = on_catalog or (lambda _catalog: None)
+        # Avance de lo que está haciendo (texto, robot que se prepara, estado
+        # "trabajando" / "listo" / "error"): para mostrarlo donde el usuario
+        # está mirando, no solo en esta pestaña.
+        self._on_progress = on_progress or (lambda _text, _robot, _state: None)
+        self.preparing: str | None = None   # robot que se está bajando e importando
+        self._quiet = False                 # carga automática: sin red no es un error
+        self._report = report
+        self._settings = settings
+        self.fetch = library._http          # los tests lo reemplazan
+        self.cache_dir = library.CACHE_DIR
+        self.models_dir = USER_MODELS_DIR
+        self.sync = False                   # tests: sin hilos
+        self.catalog: library.Catalog | None = None
+        self._task: _Task | None = None
+        self._pending_done: Callable[[object], None] | None = None
+        self._loaded_once = False
+
+        self.folder_edit = QLineEdit(str(settings.value("biblioteca/carpeta", library.DEFAULT_FOLDER)))
+        self.folder_edit.setToolTip("Enlace o ID de la carpeta de Google Drive (compartida como "
+                                    "«Cualquier persona con el enlace»)")
+        self.refresh_btn = QPushButton("Actualizar")
+        self.refresh_btn.clicked.connect(self.refresh)
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["Modelo", "Tipo"])
+        self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.tree.itemSelectionChanged.connect(self._update_buttons)
+        self.tree.itemDoubleClicked.connect(lambda *_: self.use_selected())
+        self.insert_btn = QPushButton("Insertar en la celda")
+        self.insert_btn.clicked.connect(lambda: self.use_selected("pieza"))
+        self.tool_btn = QPushButton("Montar en la brida")
+        self.tool_btn.clicked.connect(lambda: self.use_selected("herramienta"))
+        self.robot_btn = QPushButton("Usar este robot")
+        self.robot_btn.clicked.connect(lambda: self.use_selected("robot"))
+        self.datasheet_btn = QPushButton("Ver datasheet")
+        self.datasheet_btn.setToolTip("Abre el PDF del fabricante en el navegador")
+        self.datasheet_btn.clicked.connect(self.open_datasheet)
+        self.status = QLabel("La biblioteca se lee de Google Drive al abrir esta pestaña.")
+        self.status.setWordWrap(True)
+
+        layout = QVBoxLayout(self)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Carpeta:"))
+        row.addWidget(self.folder_edit, 1)
+        row.addWidget(self.refresh_btn)
+        layout.addLayout(row)
+        layout.addWidget(self.tree, 1)
+        for button in (self.insert_btn, self.tool_btn, self.robot_btn, self.datasheet_btn):
+            layout.addWidget(button)
+        layout.addWidget(self.status)
+        note = QLabel("Se clasifica por carpeta: «Robots» (o un STEP que diga BRTIRUS) → robot; "
+                      "«Herramientas», «Grippers», «Pinzas», «Antorchas» → herramienta; el resto, "
+                      "piezas. Doble clic: lo que corresponda.")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self._update_buttons()
+
+    # -- hilo ------------------------------------------------------------------------
+
+    @property
+    def busy(self) -> bool:
+        return self._task is not None
+
+    def _run(self, fn, on_done: Callable[[object], None], busy_text: str) -> None:
+        if self.busy:
+            self._report_busy()
+            return
+        self._set_status(busy_text)
+        self._set_enabled(False)
+        if self.sync:
+            try:
+                result = fn(self._set_status)
+            except Exception as e:  # noqa: BLE001
+                self._failed(str(e))
+            else:
+                self._finish()
+                on_done(result)
+            return
+        task = _Task(fn)
+        # Métodos de objetos del hilo de la interfaz (no lambdas): así Qt
+        # entrega las señales en ESE hilo. Una lambda correría en el hilo de
+        # trabajo, tocaría la interfaz desde ahí y se esperaría a sí misma.
+        task.progress.connect(self._set_status)
+        task.done.connect(self._task_done)
+        task.failed.connect(self._failed)
+        self._pending_done = on_done
+        self._task = task
+        task.start()
+
+    def _report_busy(self) -> None:
+        self._report("warning", f"La biblioteca está ocupada ({self.status.text()}): esperá a "
+                                f"que termine.")
+
+    def _set_status(self, text: str, robot: str | None = None, state: str | None = None) -> None:
+        self.status.setText(text)
+        self._on_progress(text, robot or self.preparing,
+                          state or ("trabajando" if self.busy or self.preparing else "listo"))
+
+    def _task_done(self, result) -> None:
+        on_done, self._pending_done = self._pending_done, None
+        self._finish()
+        if on_done is not None:
+            on_done(result)
+
+    def _finish(self) -> None:
+        if self._task is not None:
+            self._task.wait()        # que termine de salir antes de soltarlo
+            self._task = None
+        self.preparing = None
+        self._set_enabled(True)
+
+    def _failed(self, message: str) -> None:
+        robot = self.preparing
+        self._finish()
+        self._set_status(message, robot, "error")
+        self._report("warning" if self._quiet else "error", f"Biblioteca: {message}")
+        self._quiet = False
+
+    def _set_enabled(self, enabled: bool) -> None:
+        self.refresh_btn.setEnabled(enabled)
+        self.folder_edit.setEnabled(enabled)
+        self._update_buttons(enabled)
+
+    def shutdown(self) -> None:
+        if self._task is not None:
+            self._task.wait(10000)
+            self._task = None
+
+    # -- listar ------------------------------------------------------------------------
+
+    def ensure_loaded(self, quiet: bool = False) -> None:
+        """Primera vez que hace falta: leer la carpeta de la web. `quiet`: la
+        carga automática al abrir el simulador (sin red, es un aviso)."""
+        if not self._loaded_once and not self.busy:
+            self._loaded_once = True
+            self._quiet = quiet
+            self.refresh()
+
+    def refresh(self) -> None:
+        try:
+            fid = library.folder_id(self.folder_edit.text())
+        except library.LibraryError as e:
+            self.status.setText(str(e))
+            return
+        self._settings.setValue("biblioteca/carpeta", self.folder_edit.text().strip())
+        fetch = self.fetch
+        self._run(lambda _p: library.scan(fid, fetch), self._show, "Leyendo la carpeta de Drive…")
+
+    def _show(self, catalog: library.Catalog) -> None:
+        self._quiet = False
+        self.catalog = catalog
+        self.tree.clear()
+        groups: dict[str, QTreeWidgetItem] = {}
+        for index, item in enumerate(catalog.items):
+            category = item.category or "(sin carpeta)"
+            if category not in groups:
+                groups[category] = QTreeWidgetItem(self.tree, [category, ""])
+                groups[category].setExpanded(True)
+            kind = KIND_LABEL[item.kind]
+            if item.kind == "robot":
+                extras = ["planilla" if item.params_id else "sin planilla"]
+                if item.datasheet_id:
+                    extras.append("PDF")
+                kind += " (" + ", ".join(extras) + ")"
+            child = QTreeWidgetItem(groups[category], [item.name, kind])
+            child.setData(0, Qt.ItemDataRole.UserRole, index)
+            child.setToolTip(0, f"{item.folder}/{item.name}" if item.folder else item.name)
+        text = f"{len(catalog.items)} modelo(s) en {len(groups)} carpeta(s)."
+        if catalog.unusable:
+            text += (f" {len(catalog.unusable)} archivo(s) de CAD nativo (SolidWorks, Inventor…) "
+                     f"no se pueden usar: exportalos a STEP.")
+        self.status.setText(text)
+        self._update_buttons()
+        self._on_catalog(catalog)
+
+    def robots(self) -> list[library.Item]:
+        """Los robots de la biblioteca (vacío si todavía no se leyó)."""
+        if self.catalog is None:
+            return []
+        return [item for item in self.catalog.items if item.kind == "robot"]
+
+    def fetch_by_id(self, drive_id: str, name: str) -> Path:
+        """Bajar (o tomar de la caché) un archivo de la biblioteca por su ID,
+        sin hilo: para abrir una celda armada en otra PC."""
+        item = library.Item(drive_id, name, "", "", "pieza")
+        return library.download(item, self.cache_dir, self.fetch)
+
+    # -- usar -----------------------------------------------------------------------------
+
+    def selected(self) -> library.Item | None:
+        items = self.tree.selectedItems()
+        if not items or self.catalog is None:
+            return None
+        index = items[0].data(0, Qt.ItemDataRole.UserRole)
+        return None if index is None else self.catalog.items[int(index)]
+
+    def _update_buttons(self, enabled: bool = True) -> None:
+        item = self.selected() if enabled else None
+        self.insert_btn.setEnabled(item is not None)
+        self.tool_btn.setEnabled(item is not None)
+        self.robot_btn.setEnabled(item is not None and item.kind == "robot")
+        self.datasheet_btn.setEnabled(item is not None and bool(item.datasheet_id))
+
+    def open_datasheet(self) -> bool:
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
+        item = self.selected()
+        if item is None or not item.datasheet_id:
+            return False
+        return QDesktopServices.openUrl(QUrl(item.datasheet_url))
+
+    def use_selected(self, how: str | None = None) -> None:
+        item = self.selected()
+        if item is None:
+            return
+        how = how or item.kind
+        fetch, cache = self.fetch, self.cache_dir
+        if how == "robot":
+            self._use_robot(item)
+            return
+        on_done = self._on_tool if how == "herramienta" else self._on_insert
+        self._run(lambda _p: library.download(item, cache, fetch),
+                  lambda path: (self.status.setText(f"«{item.name}» listo."), on_done(Path(path), item)),
+                  f"Bajando «{item.name}»…")
+
+    def prepare_robot(self, item: library.Item) -> None:
+        """Bajar, importar y verificar un robot de la biblioteca (en un hilo);
+        al terminar se elige solo."""
+        self._use_robot(item)
+
+    def _use_robot(self, item: library.Item) -> None:
+        """Robot = STEP (geometría y mallas) + planilla de parámetros (ejes):
+        se bajan los dos, se arma el modelo y se verifica la cinemática."""
+        fetch, cache, out = self.fetch, self.cache_dir, self.models_dir
+
+        def work(progress):
+            from sim.robot_params import prepare_from_library
+
+            return prepare_from_library(item, fetch, cache, out, progress)
+
+        def done(result):
+            ok, n, worst = result.ik
+            parts = [f"{result.name} listo"]
+            if result.imported:
+                parts.append(f"CAD importado (alcance medido {result.reach_mm:.0f} mm)")
+            if result.params_source:
+                parts.append(f"ejes de «{result.params_source}»")
+            parts.append(f"cinemática inversa verificada en {ok}/{n} poses")
+            self._set_status(". ".join(parts) + "." +
+                             ("" if not result.warnings else " Ver avisos en Mensajes."),
+                             result.name)
+            for warning in result.warnings:
+                self._report("warning", f"{result.name}: {warning}")
+            self._on_robot(result.name)
+
+        if self.busy:
+            self._report_busy()
+            return
+        self.preparing = item.model_name
+        self._run(work, done, f"Preparando {item.model_name}…")

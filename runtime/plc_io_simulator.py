@@ -1,7 +1,6 @@
 """
-Simulador de E/S digital del PLC. Independiente del robot: el PLC tiene su
-propia E/S cableada (sensores de fixture, botones, etc.) separada de la E/S
-del robot. Esto le permite a un test "apretar un botón" (set_input) mientras
+Simulador de E/S digital para la VM de referencia. (El nombre viene de cuando
+la E/S iba a estar en un PLC; hoy representa las E/S del robot.) Esto le permite a un test "apretar un botón" (set_input) mientras
 la VM está corriendo, y luego revisar qué salidas activó el programa.
 """
 

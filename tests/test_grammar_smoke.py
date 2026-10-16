@@ -49,3 +49,10 @@ def test_grammar_loads(parser: Lark) -> None:
 def test_example_program_parses(parser: Lark) -> None:
     tree = parser.parse(EXAMPLE_PROGRAM)
     assert tree is not None
+
+
+def test_joint_points_parse_and_keep_their_frame():
+    from compiler.ast_builder import build_ast
+
+    ast = build_ast("POINT casa = JOINT(0, 45, -45, 0, -75, 0)\nPOINT p = WORLD(1, 2, 3, 0, 0, 0)\n")
+    assert [s.expr.frame for s in ast.statements] == ["JOINT", "WORLD"]

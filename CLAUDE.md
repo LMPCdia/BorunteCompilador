@@ -5,29 +5,34 @@ Contiene lo que un colaborador nuevo necesitaría saber antes de tocar código.
 
 ## Qué es esto
 
-Lenguaje tipo KRL para programar un robot Borunte a través de un PLC Coolmay
-CX3G, vía Modbus. Arquitectura de 2 niveles — LEER PRIMERO:
-`docs/ARCHITECTURE.md`, después `docs/MODBUS_REGISTER_MAP.md`,
-`docs/INSTRUCTION_SET.md`, `docs/SIMULATION.md`.
+Lenguaje tipo KRL para programar un robot Borunte. El programa se compila a un
+**respaldo del pad** (`HCBackupRobot_<fecha>.zip`) que se importa en el teach
+pendant por pendrive, y lo ejecuta el controlador del robot solo. LEER
+PRIMERO: `docs/ARCHITECTURE.md`, después `docs/LENGUAJE.md` (la guía del
+lenguaje, sus ejemplos los compila un test), `docs/PAD_FORMAT.md`,
+`docs/INSTRUCTION_SET.md`, `docs/MODBUS_REGISTER_MAP.md`, `docs/SIMULATION.md`.
 
-No hay hardware físico disponible todavía. Todo se desarrolla y prueba
-contra `comms/robot_simulator.py`, un simulador en software cuyos supuestos
-de comportamiento están documentados (y marcados como hipótesis, no hechos)
-en `docs/SIMULATION.md`.
+**Ya no hay PLC.** Hasta octubre 2026 el plan era una VM en ladder sobre un
+Coolmay CX3G; se descartó y se borró ese código (`comms/plc_client.py`,
+`plc_vm/`). Si algo todavía habla de "PLC", es un resto a limpiar.
+
+No hay pad ni robot disponibles todavía. El formato del pad salió de UN
+respaldo real; la lógica se prueba contra `comms/robot_simulator.py`.
 
 ## Reglas del proyecto (leer antes de escribir código)
 
 1. **Nunca inventes comportamiento del hardware real como si estuviera
-   confirmado.** Si algo no está en `docs/MODBUS_REGISTER_MAP.md` como
-   confirmado, tratalo como hipótesis y decilo explícitamente en el código
-   (comentario) y en tu respuesta al usuario.
-2. **`plc_vm/` no se toca con código.** Es la VM que se escribe a mano en
-   GX Developer/Works2 contra el PLC real. Esa carpeta es solo documentación
-   y pseudocódigo. No generes ladder ni intentes automatizarlo.
-3. **`docs/INSTRUCTION_SET.md` es un contrato.** Si tu tarea requiere
-   cambiarlo (agregar un opcode, cambiar el formato de instrucción), parate
-   y avisá antes de seguir — ese archivo lo consumen `compiler/`, `runtime/`
-   y (eventualmente) `plc_vm/`. Un cambio silencioso rompe a los otros dos.
+   confirmado.** Si algo no está en `docs/PAD_FORMAT.md` o
+   `docs/MODBUS_REGISTER_MAP.md` como confirmado, tratalo como hipótesis y
+   decilo explícitamente en el código (comentario) y en tu respuesta.
+2. **El generador del pad no adivina.** Lo que no sabemos expresar en el
+   formato del pad es un `CompileError` claro, nunca una acción "probable":
+   el robot ejecuta lo que se le carga sin nadie mirando. Lo que sabemos
+   expresar pero el respaldo real nunca mostró va detrás de
+   `PadOptions.allow_unverified` (apagado por defecto al exportar). Para
+   agregar algo hace falta un respaldo real del pad que lo muestre.
+3. **`docs/PAD_FORMAT.md` e `docs/INSTRUCTION_SET.md` son contratos.** Si tu
+   tarea cambia el formato generado o un opcode, avisá antes de seguir.
 4. **Todo cambio en `compiler/` o `runtime/` debe dejar
    `pytest tests/ -v` en verde antes de darse por terminado.** Si agregás
    funcionalidad nueva, agregá un test que la cubra en `tests/`.
@@ -38,39 +43,64 @@ en `docs/SIMULATION.md`.
    `docs/MODBUS_REGISTER_MAP.md`.
 6. **No agregues dependencias nuevas sin decirlo explícitamente en tu
    resumen final.** El stack es: `lark` (parser), `pymodbus` (Modbus),
-   `PySide6` (GUI), `pytest` (tests). Cualquier librería nueva debe
+   `PySide6` (GUI y 3D con Qt3D), `gmsh` (lectura de STEP), `python-fcl` +
+   `numpy` (choques del simulador), `pytest` (tests). Cualquier librería nueva debe
    justificarse.
 
 ## Estado actual (ver también README.md, que puede estar más actualizado)
 
-**154 tests en verde.** Los de GUI necesitan `QT_QPA_PLATFORM=offscreen` si no
-hay display.
+**Tests en verde** (`QT_QPA_PLATFORM=offscreen` para los de GUI sin display).
 
-- **Contrato v0.2** (`docs/INSTRUCTION_SET.md`): opcodes hasta `0x0F`, formato
-  de 8 words con los 32 bits en **word bajo primero** del lado del PLC,
-  calling convention de `PROC`, y el bloque de registros de control de la VM
-  (`D0-D7`, handshake por `D3`, bases `D1000`/`D4000`).
-- **Compilador v0.3** (`compiler/`): `IF` con `VAR == CONST` y `VAR == VAR`,
-  `PROC` con parámetros por slots fijos, asignación entre variables,
-  comentarios y líneas en blanco en cualquier parte, archivo sin salto de línea
-  final. Pasada 0 (`_collect_proc_signatures`) para que las llamadas hacia
-  adelante también carguen sus parámetros.
-- **`runtime/vm.py`**: soporta todos los opcodes del contrato y tiene
-  `request_stop()` para cortar en el próximo límite de instrucción.
-- **`comms/plc_client.py`**: `CoolmayPlcClient`, espejo de
-  `BorunteRobotClient` pero para el PLC. Carga bytecode + puntos, handshake de
-  comandos, banco de variables, relectura para verificar, troceado de
-  transacciones.
-- **GUI v0.2** (`gui/`): `QMainWindow` con paneles acoplables — estructura del
-  proyecto (navega al código), propiedades (muestra el registro `D` destino),
-  ventana de mensajes, campos de trabajo, resaltado de sintaxis con dos
-  paletas, digitalización de puntos, y ejecutar/parar en un hilo aparte.
-- **`packaging/`**: `.exe` de un solo archivo, con `--self-test` como criterio
-  de aceptación.
+- **`pad/`**: `backup.py` lee y escribe respaldos byte a byte (acciones como
+  `dict` crudos); `listing.py` los muestra legibles; `template.fnc` es el
+  `.fnc` del respaldo real, que se copia en los respaldos nuevos.
+- **`compiler/pad_codegen.py`**: AST -> respaldo del pad. `MOVEJ` exige punto
+  `JOINT(...)` y `MOVEL` `WORLD(...)`. Sin `VAR`, `ELSE`, `WAIT_IN` ni
+  parámetros (error de compilación).
+- **`compiler/program_files.py`**: el programa es `<nombre>.src` (lógica,
+  sin POINT) + `<nombre>.dat` (solo POINT) + `config.dat` (puntos comunes de
+  la carpeta); se juntan para compilar y los errores dicen archivo y línea.
+  Un `.krlb` (todo junto) sigue andando. El respaldo del pad no cambia.
+- **`compiler/pad_import.py`**: respaldo del pad -> `.src` + `.dat` (+ `.fnc`),
+  con ida y vuelta exacta (`compare`). El lenguaje tiene opciones de
+  movimiento (`SMOOTH`, `DELAY`, `TOOL`/`COORD`, `NEAR_END`/`AWAY_START`),
+  `LABEL`/`IF … GOTO`/`THEN GOTO`, `DISABLED`, `COMMENT`, `CMD STOP` y `AS`.
+  `pad/pad_html.py` cruza un respaldo con el listado HTML del pad;
+  `pad/bindio.py` decodifica `bindIOInfo` (salida por distancia). Las
+  etiquetas y los saltos los ejecuta el pad: la VM da `PadOnlyError`.
+- **`compiler/codegen.py` + `runtime/vm.py`**: bytecode y VM de referencia,
+  solo para simular la lógica en la PC.
+- **`comms/robot_client.py`**: Modbus del robot, para digitalizar puntos y
+  simular contra el robot real.
+- **`sim/`**: simulador cinemático del respaldo del pad. Robot por defecto:
+  **BRTIRUS1510A** (el de la celda), con cotas y mallas sacadas del STEP del
+  fabricante (`python -m sim.robot_import`). Velocidades confirmadas por el usuario;
+  rangos de la misma tabla, sin confirmar. También está el BRTIRUS1820A
+  (cilindros, del plano). Pestaña "Simulación 3D" con layout de
+  piezas STEP/STL/OBJ y búsqueda de choques (`sim/collision.py`, python-fcl:
+  piezas como sólidos, piso, el propio brazo, herramienta montada en la
+  brida), gráficas de movimiento (perfil de aceleración supuesto), navegación
+  tipo Inventor, ubicación de piezas por distancias, el robot corrido y
+  girado en la celda (`Layout.robot_base`) y biblioteca en línea de
+  Google Drive (`sim/library.py`): cada robot = STEP + planilla de parámetros
+  (`sim/robot_params.py`), que se baja, se compara con el CAD y se verifica
+  con la cinemática inversa; sus robots salen en la lista Robot. El
+  importador encuentra los ejes en los cilindros del STEP (`find_axes`,
+  validado con el plano del 0805A). **Pendiente**: el 1510A de la app tiene
+  J2 36 mm más abajo que lo que da ese método (ver `docs/SIMULATOR.md`).
+  Ver `docs/SIMULATOR.md`.
+- **GUI** (`gui/`): "Exportar para el pad" (Ctrl+E) + pestaña "Pad" con el
+  listado; compilar/ejecutar en la VM; digitalizar puntos.
+- **`packaging/`** + `.github/workflows/build-exe.yml`: `.exe` de un solo
+  archivo construido en un runner Windows, con `--self-test` como criterio.
+
+**Skill `actualizar-simulador`** (`.claude/skills/`): revisar la carpeta de
+Drive (`python -m sim.library`), importar un robot nuevo, publicar el `.exe`.
 
 ## Cosas que ya se aprendieron a golpes (no repetirlas)
 
-1. **`compiler/grammar.lark` se lee como archivo en runtime.** Cualquier forma
+1. **`compiler/grammar.lark` y `pad/template.fnc` se leen como archivos en
+   runtime.** Cualquier forma
    de empaquetar o mover el proyecto tiene que llevarlo. Sin él el programa
    abre bien y falla al compilar, y con `console=False` el error no se ve.
    `python -m gui.app --self-test` lo detecta.
@@ -86,47 +116,51 @@ hay display.
 5. **PowerShell no espera a un ejecutable sin consola.** `& $exe` devuelve
    `$LASTEXITCODE` 0 pase lo que pase; hay que usar
    `Start-Process -Wait -PassThru` y mirar `ExitCode`.
-6. **El resaltado necesita dos paletas.** Una sola pensada para fondo blanco
+6. **Qt3D sin OpenGL hace caer el proceso** (segmentation fault, no
+   excepción). `gui/viewport3d.py: opengl_available()` se consulta SIEMPRE
+   antes de crear la vista, y los tests nunca la construyen. Para verla en un
+   contenedor: `xvfb-run` + `QT_QPA_PLATFORM=xcb`.
+7. **gmsh carga su DLL con ctypes**: PyInstaller no la ve. El spec la agrega
+   a mano (`GMSH_BINARIES`) y el self-test importa un STEP para verificarlo.
+   Lo mismo con las DLL de python-fcl (`FCL_BINARIES`); si la extensión no
+   carga, `fcl` se importa vacío (sin excepción): `sim.collision.available()`
+   lo detecta.
+8. **El resaltado necesita dos paletas.** Una sola pensada para fondo blanco
    queda ilegible sobre el tema oscuro de Windows. Hay un test de contraste
    WCAG 3.0:1.
 
 ## Tareas priorizadas
 
-### Tarea E — Panel de la GUI para la VM del PLC (siguiente)
+### Probar en el pad (bloqueada hasta tener el pad)
 
-`comms/plc_client.py` sabe cargar el programa, arrancarlo, pararlo y leer el
-Program Counter en vivo, pero **nadie lo usa**: hoy el "Ejecutar" de la barra
-corre la VM de referencia en la PC, no en el CX3G. Falta el panel que cargue el
-programa compilado y muestre PC + estado + banco de variables en vivo. El poll
-del estado va en un hilo aparte, como `gui/vm_worker.py`, no en el hilo de la
-UI.
+Primero importar un respaldo reescrito sin cambios por `pad/backup.py`;
+después uno generado, a velocidad baja. Ver `docs/PAD_FORMAT.md`.
 
-### Tarea F — Deduplicar la tabla de puntos en el codegen
+### Decodificar lo que falta del pad (necesita respaldos de ejemplo)
 
-Cada `MOVEJ`/`MOVEL` registra una entrada nueva en `program.points` aunque
-mueva a un `POINT` ya declarado. En el programa de ejemplo: **5 entradas para 2
-puntos declarados**. No es un error de corrección, pero se come los 333 lugares
-que tiene el PLC. Cambia los índices del bytecode, así que hay que hacerlo con
-cuidado y con los tests delante.
+Espera de entrada (`WAIT_IN`), salto incondicional (`ELSE`), variables. Cada
+uno necesita un respaldo exportado del pad que lo use.
 
-### Tarea G — Persistencia de puntos digitalizados
+### Herramienta, coordenadas y plantilla desde la GUI
 
-Decisión de diseño 3 de `docs/ARCHITECTURE.md` (SQLite/JSON en la PC). Hoy
-viven solo en memoria de la GUI y se pierden al cerrarla.
+Hoy se exporta con herramienta 0 / coordenadas 0 y el `.fnc` del respaldo
+analizado. `PadOptions` ya acepta `tool`, `coord` y `template`; falta la UI.
+
+### Digitalizar en JOINT
+
+F8 lee la posición cartesiana; para usar un punto digitalizado en un `MOVEJ`
+hace falta leer los ejes (`read_axis_position()`) y escribir `JOINT(...)`.
 
 ### Otros
 
-- Recordar la disposición de los paneles entre sesiones
-  (`QMainWindow.saveState`).
-- Del lenguaje: no hay bucles (`WHILE`/`FOR`), `IF` solo soporta `==`, `TIMER`
-  se parsea pero no emite nada, y los `OFFSET` se resuelven en compilación.
-- `plc_vm/` (la VM en ladder) sigue bloqueada hasta tener el CX3G delante, y no
-  es delegable: necesita GX Developer/Works2.
+- Persistencia de puntos digitalizados (JSON en la PC).
+- Recordar la disposición de los paneles (`QMainWindow.saveState`).
+- Renombrar `runtime/plc_io_simulator.py` (resto del PLC).
 
 ### Completadas
 
-Tarea A (codegen de dos pasadas), Tarea B (GUI v0.1), Tarea C (cliente del
-PLC), Tarea D (afinar la GUI).
+Tareas A-D (codegen de dos pasadas, GUI, afinado). Tarea C (cliente del PLC) y
+E (panel del PLC) quedaron sin efecto al descartar el PLC.
 
 ## Cómo correr todo
 

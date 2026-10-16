@@ -236,20 +236,33 @@ def test_insert_as_point_writes_declarations_into_the_editor(window):
     """Lo que cierra el circuito: sin esto la tabla no tenía salida hacia el
     programa."""
     _connect_to_simulator(window)
-    window.editor.setPlainText("")
+    window.dat_editor.setPlainText("POINT p_viejo = JOINT(0, 0, 0, 0, 0, 0)")
     window._on_digitize()
     window._on_insert_points()
-    texto = window.editor.toPlainText()
-    assert "POINT p_digit_1 = WORLD(" in texto
+    # El programa está separado: los puntos van al final del .dat, no al .src.
+    texto = window.dat_editor.toPlainText()
+    assert texto.splitlines()[0] == "POINT p_viejo = JOINT(0, 0, 0, 0, 0, 0)"
+    assert texto.splitlines()[1].startswith("POINT p_digit_1 = WORLD(")
+    assert "p_digit_1" not in window.editor.toPlainText()
+    assert window.program_tabs.currentWidget() is window.dat_editor
+
+
+def test_insert_as_point_in_a_single_file_program_goes_to_the_editor(window):
+    from compiler import program_files as pf
+
+    _connect_to_simulator(window)
+    window.set_sources(pf.ProgramSources(pf.SourceFile("viejo.krlb", "")))
+    window._on_digitize()
+    window._on_insert_points()
+    assert "POINT p_digit_1 = WORLD(" in window.editor.toPlainText()
 
 
 def test_insert_as_point_uses_the_name_edited_by_the_user(window):
     _connect_to_simulator(window)
-    window.editor.setPlainText("")
     window._on_digitize()
     window.digitized_table.item(0, 0).setText("p_apoyo")
     window._on_insert_points()
-    assert "POINT p_apoyo = WORLD(" in window.editor.toPlainText()
+    assert "POINT p_apoyo = WORLD(" in window.dat_editor.toPlainText()
 
 
 def test_generated_declaration_recompiles():
@@ -260,3 +273,33 @@ def test_generated_declaration_recompiles():
     decl = MainWindow.point_declaration("p_test", Pose(1.5, -2.25, 3.0, 0.0, 0.0, 180.0))
     program = compile_source(decl + "\nMOVEJ p_test SPEED 50\n")
     assert program.point_names["p_test"] == 0
+
+
+# --- exportar al pad ------------------------------------------------------------
+
+
+def test_example_program_exports_to_the_pad(window, tmp_path):
+    from pad.backup import PadBackup
+
+    path = window.export_to_pad(tmp_path)
+    assert path is not None and path.parent == tmp_path
+    assert path.name.startswith("HCBackupRobot_") and path.suffix == ".zip"
+    backup = PadBackup.read(path)
+    assert [m.name for m in backup.act.modules] == ["soldar_pieza"]
+    assert "CALL soldar_pieza()" in window.pad_view.toPlainText()
+    assert window.tabs.currentWidget() is window.pad_view
+
+
+def test_export_error_goes_to_the_messages_and_writes_nothing(window, tmp_path):
+    window.editor.setPlainText("WAIT_IN(X010, 5)\n")
+    assert window.export_to_pad(tmp_path) is None
+    assert list(tmp_path.iterdir()) == []
+    assert any("WAIT_IN" in text for _level, _source, text in window.messages.messages())
+
+
+def test_pad_program_name_comes_from_the_file(window, tmp_path):
+    from pathlib import Path
+
+    assert window.pad_program_name() == "BorunteDSL"
+    window._current_path = Path(tmp_path) / "Reja grande ñ.krlb"
+    assert window.pad_program_name() == "Reja_grande__"

@@ -1,0 +1,298 @@
+"""
+Lo que el visor 3D necesita y se puede probar sin placa de video:
+
+- `robot_link_meshes`: un `Mesh` por eslabón (base + J1..J6) en la posición
+  cero, en coordenadas del mundo. Si el JSON del modelo trae `"meshes"` (un
+  archivo por eslabón, exportado del CAD del fabricante en la posición cero),
+  se usan esos; si no, piezas simples a partir de las cotas.
+- `Layout`: los objetos importados para armar la celda, guardables en JSON,
+  y dónde está parado el robot (`robot_base`).
+- `Timeline`: la trayectoria simulada como función del tiempo.
+
+Con producto de exponenciales, cada eslabón dibujado en la posición cero se
+ubica con `model.joint_frames(q)[i]` en coordenadas de la BASE del robot. La
+celda tiene sus propias coordenadas (piso en z = 0): el robot se para donde
+dice `Layout.robot_base` (X, Y, Z, Rx, Ry, Rz), y todo lo del robot (eslabones,
+trayectoria, sistemas de coordenadas del pad) se lleva a la celda con
+`base_matrix`. Las piezas ya están en coordenadas de la celda. Con el robot en
+el origen (lo de siempre) las dos coinciden.
+"""
+
+from __future__ import annotations
+
+import bisect
+import json
+import math
+import os
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+
+from sim.kinematics import MODELS_DIR, Matrix, RobotModel, model_path, pose_matrix
+from sim.meshes import Mesh, box, cylinder, load_mesh
+from sim.pad_sim import Segment, SimResult, untrapezoid
+
+RAMP_STEP_S = 0.01  # muestras extra en el arranque y el frenado (ver _with_ramps)
+
+LINK_NAMES = ["base", "J1", "J2", "J3", "J4", "J5", "J6"]
+
+
+def robot_link_meshes(model: RobotModel, tool_axis: bool = True) -> list[Mesh]:
+    """`tool_axis`: dibujar el eje de la herramienta en la brida (una ayuda
+    visual: para los choques no cuenta)."""
+    files = _mesh_files(model)
+    if files:
+        return [load_mesh(f) for f in files]
+    return _simple_links(model, tool_axis)
+
+
+def has_real_meshes(model: RobotModel) -> bool:
+    """¿El modelo trae las mallas del fabricante? Si no, el robot son cilindros."""
+    return _mesh_files(model) is not None
+
+
+def _mesh_files(model: RobotModel) -> list[Path] | None:
+    path = model_path(model.name)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    names = data.get("meshes")
+    if not names:
+        return None
+    # Las mallas van al lado del JSON. Un modelo del usuario que solo cambia
+    # los ejes de un robot que viene con la app (planilla de parámetros) usa
+    # las mallas de la app.
+    for folder in (path.parent / model.name, MODELS_DIR / model.name):
+        files = [folder / n for n in names]
+        if all(f.exists() for f in files):
+            return files
+    return None
+
+
+def _simple_links(m: RobotModel, tool_axis: bool = True) -> list[Mesh]:
+    z2, z3 = m.d1, m.d1 + m.a2
+    zw, xw = z3 + m.a3, m.a1 + m.d4
+    x4 = m.a1 + m.d4 * 0.35  # dónde empieza la parte del antebrazo que gira con J4
+    base_h = m.d1 * 0.55
+    flange = cylinder((xw, 0, zw), (xw + m.d6, 0, zw), 38)
+    if tool_axis:
+        flange.extend(cylinder((xw + m.d6, 0, zw), (xw + m.d6 + 60, 0, zw), 6))
+    return [
+        cylinder((0, 0, 0), (0, 0, base_h), 160).extend(box((0, 0, 15), (350, 350, 30))),
+        cylinder((0, 0, base_h), (0, 0, z2), 130)
+        .extend(cylinder((m.a1, -110, z2), (m.a1, 110, z2), 110)),
+        cylinder((m.a1, 0, z2), (m.a1, 0, z3), 75)
+        .extend(cylinder((m.a1, -95, z2), (m.a1, 95, z2), 95)),
+        cylinder((m.a1, -85, z3), (m.a1, 85, z3), 85)
+        .extend(cylinder((m.a1, 0, z3), (m.a1, 0, zw), 70))
+        .extend(cylinder((m.a1, 0, zw), (x4, 0, zw), 70)),
+        cylinder((x4, 0, zw), (xw - 40, 0, zw), 55),
+        cylinder((xw, -55, zw), (xw, 55, zw), 50),
+        flange,
+    ]
+
+
+# --- layout -------------------------------------------------------------------------
+
+
+@dataclass
+class LayoutObject:
+    name: str
+    path: str                 # archivo STEP/STL/OBJ
+    x: float = 0.0            # mm, en coordenadas de la celda
+    y: float = 0.0
+    z: float = 0.0
+    rz: float = 0.0           # grados alrededor del eje vertical
+    color: str = "#9aa4ad"
+    # La herramienta trabaja sobre esta pieza (p. ej. la que se suelda): para la
+    # herramienta solo cuenta tocarla, no acercarse. El brazo usa el margen igual.
+    workpiece: bool = False
+    drive_id: str = ""        # vino de la biblioteca de Drive: en otra PC se vuelve a bajar
+
+
+@dataclass
+class Layout:
+    """La celda: modelo de robot, piezas importadas, las herramientas y
+    sistemas de coordenadas del pad (número -> X, Y, Z, U, V, W), y lo que hace
+    falta para buscar choques: la herramienta física montada en la brida (su
+    modelo 3D en coordenadas de la brida, y cómo está montada) y el margen."""
+
+    model: str = "BRTIRUS1510A"
+    objects: list[LayoutObject] = field(default_factory=list)
+    tools: dict[int, list[float]] = field(default_factory=dict)
+    frames: dict[int, list[float]] = field(default_factory=dict)
+    tool_mesh: str = ""                       # STEP/STL/OBJ de la antorcha, pinza, etc.
+    tool_drive_id: str = ""                   # si vino de la biblioteca de Drive
+    tool_mount: list[float] = field(default_factory=lambda: [0.0] * 6)
+    margin_mm: float = 20.0
+    collisions: bool = True                   # buscar choques al simular
+    # Dónde está parado el robot en la celda: X, Y, Z (mm) y Rx, Ry, Rz (°),
+    # con la convención de `pose_matrix` (gira en X, después en Y, después en
+    # Z, sobre los ejes fijos de la celda). Todo en cero: en el origen, parado.
+    robot_base: list[float] = field(default_factory=lambda: [0.0] * 6)
+
+    def base_matrix(self) -> Matrix:
+        return base_matrix(self.robot_base)
+
+    def save(self, path: str | Path) -> None:
+        path = Path(path)
+        data = {
+            "model": self.model,
+            "collisions": self.collisions,
+            "margin_mm": self.margin_mm,
+            "tool_mesh": _relative(self.tool_mesh, path) if self.tool_mesh else "",
+            "tool_mount": list(self.tool_mount),
+            "tool_drive_id": self.tool_drive_id,
+            "robot_base": list(self.robot_base),
+            # Claves como texto: JSON no tiene claves numéricas.
+            "tools": {str(k): list(v) for k, v in sorted(self.tools.items())},
+            "frames": {str(k): list(v) for k, v in sorted(self.frames.items())},
+            "objects": [],
+        }
+        for obj in self.objects:
+            item = asdict(obj)
+            item["path"] = _relative(obj.path, path)
+            data["objects"].append(item)
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    @classmethod
+    def load(cls, path: str | Path) -> "Layout":
+        path = Path(path)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        objects = []
+        for item in data.get("objects", []):
+            obj = LayoutObject(**item)
+            if not Path(obj.path).is_absolute():
+                obj.path = str(path.parent / obj.path)
+            objects.append(obj)
+        def poses(key: str) -> dict[int, list[float]]:
+            out = {}
+            for k, v in data.get(key, {}).items():
+                values = [float(x) for x in v]
+                if len(values) != 6 or not all(math.isfinite(x) for x in values):
+                    raise ValueError(f"{key} {k}: hacen falta 6 números (X, Y, Z, U, V, W)")
+                out[int(k)] = values
+            return out
+
+        mount = [float(x) for x in data.get("tool_mount", [0.0] * 6)]
+        if len(mount) != 6 or not all(math.isfinite(x) for x in mount):
+            raise ValueError("tool_mount: hacen falta 6 números (X, Y, Z, U, V, W)")
+        base = [float(x) for x in data.get("robot_base", [0.0] * 6)]
+        if len(base) != 6 or not all(math.isfinite(x) for x in base):
+            raise ValueError("robot_base: hacen falta 6 números (X, Y, Z, Rx, Ry, Rz)")
+        margin = float(data.get("margin_mm", 20.0))
+        if not (math.isfinite(margin) and 0 <= margin <= 1000):
+            raise ValueError("margin_mm: tiene que ser un número entre 0 y 1000")
+        tool_mesh = data.get("tool_mesh") or ""
+        if tool_mesh and not Path(tool_mesh).is_absolute():
+            tool_mesh = str(path.parent / tool_mesh)
+        return cls(model=data.get("model", "BRTIRUS1820A"), objects=objects,
+                   tools=poses("tools"), frames=poses("frames"), tool_mesh=tool_mesh,
+                   tool_mount=mount, margin_mm=margin,
+                   tool_drive_id=str(data.get("tool_drive_id", "")),
+                   collisions=bool(data.get("collisions", True)), robot_base=base)
+
+
+def base_matrix(pose: list[float] | None) -> Matrix:
+    """Base del robot -> celda."""
+    return pose_matrix(*(pose or [0.0] * 6))
+
+
+
+def _relative(file: str, layout_path: Path) -> str:
+    """Ruta relativa al layout, para poder mover la carpeta entera. relpath y no
+    relative_to: también sirve con piezas en una carpeta hermana
+    ("../piezas/mesa.stl"). Entre unidades de Windows no se puede: queda absoluta."""
+    try:
+        return os.path.relpath(Path(file).resolve(), layout_path.resolve().parent)
+    except ValueError:
+        return file
+
+
+# --- línea de tiempo -----------------------------------------------------------------
+
+
+class Timeline:
+    """Ángulos de los ejes en función del tiempo, a partir de una simulación."""
+
+    def __init__(self, result: SimResult, start_deg: list[float] | None = None) -> None:
+        first = next((s.samples[0] for s in result.segments if s.samples), None)
+        start = start_deg or result.start_deg or first or [0.0] * 6
+        self.times: list[float] = [0.0]
+        self.poses: list[list[float]] = [list(start)]
+        self.labels: list[str] = [""]
+        self.tools: list[int] = [0]  # herramienta activa (para la punta)
+        t = 0.0
+        for seg in result.segments:
+            label = f"{seg.where} {seg.name}".strip()
+            if seg.kind == "WAIT" or len(seg.samples) < 2:
+                # Quieto todo el tramo: primero ubicarse, después esperar.
+                self._append(t, seg.samples[-1], label, seg.tool)
+                t += max(0.0, seg.duration_s)
+                self._append(t, seg.samples[-1], label, seg.tool)
+                continue
+            # Cada muestra en su tiempo real (cerca de una singularidad los
+            # tramos chicos en el espacio pueden ser largos en el tiempo).
+            times = seg.times if len(seg.times) == len(seg.samples) else [
+                seg.duration_s * i / (len(seg.samples) - 1) for i in range(len(seg.samples))]
+            for dt, q in _with_ramps(seg, times):
+                self._append(t + dt, q, label, seg.tool)
+            t += seg.duration_s
+
+    def _append(self, t: float, q: list[float], where: str, tool: int = 0) -> None:
+        self.times.append(t)
+        self.poses.append(list(q))
+        self.labels.append(where)
+        self.tools.append(tool)
+
+    def jumps(self) -> list[float]:
+        """Instantes en que el robot "salta" sin moverse (el simulador se
+        recuperó de un movimiento imposible): ahí no hay velocidad que medir."""
+        out = []
+        for i in range(1, len(self.times)):
+            if self.times[i] == self.times[i - 1] and any(
+                    abs(a - b) > 1e-6 for a, b in zip(self.poses[i], self.poses[i - 1])):
+                out.append(self.times[i])
+        return out
+
+    def tool_at(self, t: float) -> int:
+        i = min(max(1, bisect.bisect_right(self.times, t)), len(self.times) - 1)
+        return self.tools[i]
+
+    @property
+    def duration(self) -> float:
+        return self.times[-1]
+
+    def at(self, t: float) -> tuple[list[float], str]:
+        """Ángulos interpolados en `t` y la instrucción que se está ejecutando."""
+        if t <= 0:
+            return list(self.poses[0]), self.labels[min(1, len(self.labels) - 1)]
+        if t >= self.duration:
+            return list(self.poses[-1]), self.labels[-1]
+        i = bisect.bisect_right(self.times, t)
+        t0, t1 = self.times[i - 1], self.times[i]
+        f = 0.0 if t1 == t0 else (t - t0) / (t1 - t0)
+        q = [a + (b - a) * f for a, b in zip(self.poses[i - 1], self.poses[i])]
+        return q, self.labels[i]
+
+
+def _with_ramps(seg: Segment, times: list[float]) -> list[tuple[float, list[float]]]:
+    """(tiempo, ángulos) del tramo. Con perfil de aceleración, entre dos
+    muestras el robot NO va a velocidad pareja (está acelerando), así que se
+    agregan puntos cada RAMP_STEP_S en el arranque y el frenado, ubicados con
+    el perfil exacto. Sin eso, la velocidad y la aceleración que se derivan de
+    la animación salen con escalones que el robot no tiene."""
+    points = list(zip(times, seg.samples))
+    a, total = seg.accel_s, seg.duration_s
+    if a <= 0 or total <= 0 or len(times) < 2:
+        return points
+    nominal = [untrapezoid(x, total, a) for x in times]
+    ramp = min(a, total / 2)
+    extra = [i * RAMP_STEP_S for i in range(1, int(ramp / RAMP_STEP_S) + 1)]
+    extra += [total - x for x in extra]
+    for tau in extra:
+        u = untrapezoid(tau, total, a)
+        i = min(max(1, bisect.bisect_right(nominal, u)), len(nominal) - 1)
+        u0, u1 = nominal[i - 1], nominal[i]
+        f = 0.0 if u1 == u0 else (u - u0) / (u1 - u0)
+        q0, q1 = seg.samples[i - 1], seg.samples[i]
+        points.append((tau, [x + (y - x) * f for x, y in zip(q0, q1)]))
+    points.sort(key=lambda p: p[0])
+    return points

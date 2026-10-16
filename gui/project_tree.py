@@ -26,13 +26,6 @@ from dataclasses import dataclass
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QTreeWidget, QTreeWidgetItem
 
-from comms.plc_client import (
-    D_BYTECODE_BASE,
-    D_POINTS_BASE,
-    D_VAR_BASE,
-    WORDS_PER_INSTRUCTION,
-    WORDS_PER_POINT,
-)
 from runtime.bytecode import Program
 
 # Qt.UserRole guarda el tipo de nodo; UserRole+1 la línea; UserRole+2 las
@@ -142,7 +135,6 @@ class ProjectTree(QTreeWidget):
                 ("Nombre", name),
                 ("Índice en la tabla", str(index)),
                 *[(axis, f"{value:g}") for axis, value in coords],
-                ("Registro D del PLC", f"D{D_POINTS_BASE + index * WORDS_PER_POINT}"),
             ]
             self._make_node(
                 root,
@@ -164,7 +156,6 @@ class ProjectTree(QTreeWidget):
                 ("Nombre", name),
                 ("PC de entrada", str(pc)),
                 ("Parámetros", ", ".join(params) or "(ninguno)"),
-                ("Registro D del PLC", f"D{D_BYTECODE_BASE + pc * WORDS_PER_INSTRUCTION}"),
             ]
             proc_item = self._make_node(
                 root,
@@ -191,7 +182,6 @@ class ProjectTree(QTreeWidget):
                         ("Nombre del slot", slot_name),
                         ("Pertenece a", name),
                         ("Índice de variable", str(index)),
-                        ("Registro D del PLC", f"D{D_VAR_BASE + index}"),
                         ("Nota", "Sin pila de frames: no es reentrante"),
                     ],
                     declarations.get(("proc", name)),
@@ -214,7 +204,6 @@ class ProjectTree(QTreeWidget):
                     ("Tipo", "Variable"),
                     ("Nombre", name),
                     ("Índice de variable", str(index)),
-                    ("Registro D del PLC", f"D{D_VAR_BASE + index}"),
                 ],
                 declarations.get(("var", name)),
             )

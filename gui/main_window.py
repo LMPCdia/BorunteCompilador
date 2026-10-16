@@ -5,7 +5,8 @@ propiedades a la derecha, mensajes y log abajo, y el editor / bytecode /
 puntos en el centro.
 
     ┌───────────────── menú + barra de herramientas ─────────────────┐
-    │ Estructura   │  Programa │ Bytecode │ Puntos      │ Propiedades │
+    │ Estructura   │ Programa │ Bytecode │ Puntos │ Pad │ Sim 3D │ Prop. │
+    │ del proyecto │ (.src · .dat · config.dat)          │             │
     │ del proyecto │                                    │             │
     ├──────────────┤                                    │             │
     │ Campos de    │                                    │             │
@@ -18,11 +19,15 @@ puntos en el centro.
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 from PySide6.QtCore import Qt, QThread
 from PySide6.QtGui import QAction, QFont, QKeySequence, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDockWidget,
+    QFrame,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
@@ -31,6 +36,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QStyle,
     QTableWidget,
@@ -41,33 +47,37 @@ from PySide6.QtWidgets import (
 )
 
 from comms.robot_client import Pose
-from compiler.codegen import CompileError, compile_source
+from compiler import program_files as pf
+from compiler import pad_import
+from compiler.codegen import CompileError, PadOnlyError
+from compiler.pad_codegen import PadOptions
 from gui.connection_panel import ConnectionPanel
 from gui.message_window import MessageWindow
 from gui.project_tree import POSE_AXIS_NAMES, ProjectTree
 from gui.properties_panel import PropertiesPanel
+from gui.sim_view import SimView
 from gui.syntax_highlighter import DslSyntaxHighlighter
 from gui.vm_worker import VmWorker
 from gui.work_fields import WorkFieldsPanel, field_by_key
+from pad.listing import list_backup
 from runtime.bytecode import Program
 from runtime.plc_io_simulator import PlcIoSimulator
 
-EXAMPLE_PROGRAM = """; Programa de ejemplo — soldadura de una pieza
-POINT p_home = WORLD(0.0, 500.0, 300.0, 0.0, 0.0, 0.0)
-POINT p_pieza = WORLD(100.0, 600.0, 200.0, 0.0, 0.0, 0.0)
-
-VAR pieza : INT = 1
+EXAMPLE_PROGRAM = """; Programa de ejemplo: un cordón de soldadura de 300 mm
+; MOVEJ va a puntos JOINT (ángulos de eje) y MOVEL a puntos WORLD (X,Y,Z,U,V,W).
+; Las E/S se escriben como en el pad: X010, Y034, ...
+; TOOL n / COORD n eligen la herramienta y el sistema de coordenadas del pad.
+POINT p_home = JOINT(0.347, 45.894, -44.865, -0.792, -75.952, -0.859)
+POINT p_pieza = WORLD(1097.1, -150.0, 721.9, 180.0, -10.0, 180.0)
 
 PROC soldar_pieza()
 MOVEJ p_home SPEED 80
-MOVEL p_pieza SPEED 50
-IF pieza == 1 THEN
-SET_OUT(Y10, ON)
-ELSE
-SET_OUT(Y11, ON)
-ENDIF
-WAIT 0.2s
-SET_OUT(Y10, OFF)
+MOVEL p_pieza + OFFSET(0, 0, 100, 0, 0, 0) SPEED 50
+MOVEL p_pieza SPEED 10
+SET_OUT(Y010, ON)
+MOVEL p_pieza + OFFSET(0, 300, 0, 0, 0, 0) SPEED 5
+SET_OUT(Y010, OFF)
+MOVEL p_pieza + OFFSET(0, 300, 100, 0, 0, 0) SPEED 50
 MOVEJ p_home SPEED 80
 ENDPROC
 
@@ -77,6 +87,18 @@ soldar_pieza()
 MONOSPACE = "Consolas, Menlo, monospace"
 
 
+def _scrollable(widget: QWidget) -> QScrollArea:
+    """Envuelve un panel para que, si la ventana es más angosta que lo que el
+    panel necesita, aparezca una barra de desplazamiento en vez de agrandar el
+    ancho mínimo de TODA la ventana. Sin esto, en Windows (fuentes y estilos
+    más anchos que en Linux) la ventana pedía 2300 px y no entraba en pantalla."""
+    area = QScrollArea()
+    area.setWidget(widget)
+    area.setWidgetResizable(True)
+    area.setFrameShape(QFrame.Shape.NoFrame)
+    return area
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -84,6 +106,8 @@ class MainWindow(QMainWindow):
         self.resize(1400, 860)
 
         self._program: Program | None = None
+        # Archivo abierto/guardado: de ahí sale el nombre del programa en el pad.
+        self._current_path: Path | None = None
         self._plc_io = PlcIoSimulator()
         self._thread: QThread | None = None
         self._worker: VmWorker | None = None
@@ -101,6 +125,9 @@ class MainWindow(QMainWindow):
         self._connect_signals()
 
         self.messages.info("Listo. F7 para compilar.", "gui")
+        for severity, message in self._pending_reports:
+            self._sim_report(severity, message)
+        self._pending_reports = []
         self._apply_work_field("programacion")
         self._refresh_action_states()
 
@@ -110,13 +137,31 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
 
-        self.editor = QPlainTextEdit()
-        self.editor.setFont(QFont(MONOSPACE, 11))
-        self.editor.setPlainText(EXAMPLE_PROGRAM)
-        self.highlighter = DslSyntaxHighlighter(
-            self.editor.document(), qt_palette=self.editor.palette()
-        )
-        self.tabs.addTab(self.editor, "Programa")
+        # El programa son tres archivos (compiler/program_files.py): la lógica
+        # (.src), sus puntos (.dat) y los puntos comunes de la carpeta
+        # (config.dat). Un .krlb de antes es un solo archivo: entonces solo se
+        # ve el primero.
+        self.editor = self._make_editor()          # .src (o el .krlb entero)
+        self.dat_editor = self._make_editor()
+        self.config_editor = self._make_editor()
+        self.highlighter = self._highlighters[0]
+        self.program_tabs = QTabWidget()
+        self.program_tabs.setDocumentMode(True)
+        self.program_tabs.addTab(self.editor, "programa.src")
+        self.program_tabs.addTab(self.dat_editor, "programa.dat")
+        self.program_tabs.addTab(self.config_editor, pf.CONFIG_DAT)
+        self.program_tabs.setTabToolTip(0, "La lógica del programa: movimientos, esperas, "
+                                           "salidas, IF, PROC. Sin puntos.")
+        self.program_tabs.setTabToolTip(1, "Los puntos de este programa (solo POINT)")
+        self.program_tabs.setTabToolTip(2, "Puntos comunes a todos los programas de la "
+                                           "carpeta (HOME, poses de traslado...)")
+        self.tabs.addTab(self.program_tabs, "Programa")
+        self._split = True
+        self._src_name, self._dat_name = "programa.src", "programa.dat"
+        # `.fnc` del programa (configuración del robot): el de un respaldo del
+        # pad importado, que viaja junto al .src y se usa al exportar.
+        self._fnc: bytes | None = None
+        self._combined: pf.Combined | None = None
 
         self.bytecode_view = QPlainTextEdit()
         self.bytecode_view.setReadOnly(True)
@@ -124,6 +169,76 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.bytecode_view, "Bytecode")
 
         self.tabs.addTab(self._build_points_tab(), "Puntos")
+
+        # Listado de lo que se exportó al pad, para revisarlo antes de llevarlo
+        # al robot.
+        self.pad_view = QPlainTextEdit()
+        self.pad_view.setReadOnly(True)
+        self.pad_view.setFont(QFont(MONOSPACE, 10))
+        self.tabs.addTab(self.pad_view, "Pad")
+
+        # Simulación 3D del respaldo del pad (sim/). La vista 3D solo se crea
+        # si hay OpenGL: ver gui/viewport3d.py.
+        self._pending_reports: list[tuple[str, str]] = []
+        self.sim_view = SimView(self.combined_source, report=self._sim_report,
+                                clear_reports=lambda: self.messages.clear_source("simulador"),
+                                compile_pad=lambda options: pf.compile_pad(
+                                    self.program_sources(), options))
+        self.sim_tab = _scrollable(self.sim_view)
+        self.tabs.addTab(self.sim_tab, "Simulación 3D")
+        for editor in self._editors():
+            editor.textChanged.connect(self.sim_view.source_changed)
+        self.set_sources(pf.split_single(EXAMPLE_PROGRAM, "programa.src"))
+
+    def _make_editor(self) -> QPlainTextEdit:
+        editor = QPlainTextEdit()
+        editor.setFont(QFont(MONOSPACE, 11))
+        if not hasattr(self, "_highlighters"):
+            self._highlighters: list[DslSyntaxHighlighter] = []
+        self._highlighters.append(DslSyntaxHighlighter(editor.document(),
+                                                       qt_palette=editor.palette()))
+        return editor
+
+    def _editors(self) -> list[QPlainTextEdit]:
+        return [self.editor, self.dat_editor, self.config_editor]
+
+    # -- el programa: .src + .dat + config.dat ------------------------------------
+
+    def program_sources(self) -> pf.ProgramSources:
+        src = pf.SourceFile(self._src_name, self.editor.toPlainText())
+        if not self._split:
+            return pf.ProgramSources(src)
+        return pf.ProgramSources(src, pf.SourceFile(self._dat_name, self.dat_editor.toPlainText()),
+                                 pf.SourceFile(pf.CONFIG_DAT, self.config_editor.toPlainText()),
+                                 fnc=self._fnc)
+
+    def combined_source(self) -> str:
+        """El programa entero en un texto (lo que compila el simulador)."""
+        return pf.combine(self.program_sources()).text
+
+    def set_sources(self, sources: pf.ProgramSources) -> None:
+        """Muestra un programa: tres archivos, o uno solo (.krlb de antes)."""
+        self._split = sources.split
+        self._fnc = sources.fnc
+        self._src_name = sources.src.name
+        self._dat_name = sources.dat.name if sources.dat else Path(sources.src.name).with_suffix(
+            pf.DAT_SUFFIX).name
+        texts = [sources.src.text, sources.dat.text if sources.dat else "",
+                 sources.config.text if sources.config else ""]
+        for editor, text in zip(self._editors(), texts):
+            editor.setPlainText(text)
+            editor.document().setModified(False)
+        self.program_tabs.setTabText(0, self._src_name)
+        self.program_tabs.setTabText(1, self._dat_name)
+        self.program_tabs.setTabVisible(1, self._split)
+        self.program_tabs.setTabVisible(2, self._split)
+        self.program_tabs.setCurrentIndex(0)
+        if hasattr(self, "act_split"):
+            self.act_split.setEnabled(not self._split)
+
+    def _show_editor(self, editor: QPlainTextEdit) -> None:
+        self.tabs.setCurrentWidget(self.program_tabs)
+        self.program_tabs.setCurrentWidget(editor)
 
     def _build_points_tab(self) -> QWidget:
         container = QWidget()
@@ -183,7 +298,7 @@ class MainWindow(QMainWindow):
     ) -> QDockWidget:
         dock = QDockWidget(title, self)
         dock.setObjectName(f"dock_{key}")
-        dock.setWidget(widget)
+        dock.setWidget(_scrollable(widget))
         self.addDockWidget(area, dock)
         self._docks[key] = dock
         return dock
@@ -245,6 +360,15 @@ class MainWindow(QMainWindow):
         self.act_save = QAction(self._icon(sp.SP_DialogSaveButton), "&Guardar…", self)
         self.act_save.setShortcut(QKeySequence.StandardKey.Save)
 
+        self.act_split = QAction("Separar en .src y .dat", self)
+        self.act_split.setToolTip("Pasa los POINT de un programa de un solo archivo a su .dat")
+        self.act_split.setEnabled(not self._split)
+
+        self.act_import_pad = QAction("&Importar respaldo del pad…", self)
+        self.act_import_pad.setShortcut(QKeySequence("Ctrl+I"))
+        self.act_import_pad.setToolTip(
+            "Abre un HCBackupRobot_*.zip como programa .src + .dat para seguir editándolo")
+
         self.act_quit = QAction("&Salir", self)
         self.act_quit.setShortcut(QKeySequence.StandardKey.Quit)
 
@@ -259,6 +383,15 @@ class MainWindow(QMainWindow):
         self.act_stop.setShortcut(QKeySequence("Shift+F5"))
         self.act_stop.setEnabled(False)
 
+        self.act_export_pad = QAction(self._icon(sp.SP_DriveFDIcon), "E&xportar para el pad…", self)
+        self.act_export_pad.setShortcut(QKeySequence("Ctrl+E"))
+
+        # Apagado por defecto: lo que el respaldo real nunca mostró no va al
+        # robot salvo que se pida a propósito (ver compiler/pad_codegen.py).
+        self.act_allow_unverified = QAction("Permitir instrucciones sin confirmar en el pad", self)
+        self.act_allow_unverified.setCheckable(True)
+        self.act_allow_unverified.setChecked(False)
+
         self.act_digitize = QAction(self._icon(sp.SP_ArrowDown), "&Digitalizar punto", self)
         self.act_digitize.setShortcut(QKeySequence("F8"))
         self.act_digitize.setEnabled(False)
@@ -271,6 +404,8 @@ class MainWindow(QMainWindow):
         m_file = bar.addMenu("&Archivo")
         m_file.addAction(self.act_open)
         m_file.addAction(self.act_save)
+        m_file.addAction(self.act_split)
+        m_file.addAction(self.act_import_pad)
         m_file.addSeparator()
         m_file.addAction(self.act_quit)
 
@@ -278,9 +413,20 @@ class MainWindow(QMainWindow):
         m_program.addAction(self.act_compile)
         m_program.addAction(self.act_run)
         m_program.addAction(self.act_stop)
+        m_program.addSeparator()
+        m_program.addAction(self.act_export_pad)
+        m_program.addAction(self.act_allow_unverified)
 
         m_robot = bar.addMenu("&Robot")
         m_robot.addAction(self.act_digitize)
+
+        m_sim = bar.addMenu("&Simulación")
+        act = m_sim.addAction("Simular")
+        act.setShortcut("F9")  # F6 es "encuadrar" en la vista 3D, como en Inventor
+        act.triggered.connect(lambda: (self.tabs.setCurrentWidget(self.sim_tab), self.sim_view.simulate()))
+        act = m_sim.addAction("Gráficas de movimiento…")
+        act.setShortcut("Ctrl+G")
+        act.triggered.connect(self.sim_view.show_charts)
 
         # El menú Ventana se arma con los toggles que ya trae cada dock.
         self.menu_window = bar.addMenu("&Ventana")
@@ -299,6 +445,7 @@ class MainWindow(QMainWindow):
         self.toolbar.addAction(self.act_compile)
         self.toolbar.addAction(self.act_run)
         self.toolbar.addAction(self.act_stop)
+        self.toolbar.addAction(self.act_export_pad)
         self.toolbar.addSeparator()
         self.toolbar.addAction(self.act_digitize)
 
@@ -316,10 +463,13 @@ class MainWindow(QMainWindow):
     def _connect_signals(self) -> None:
         self.act_open.triggered.connect(self._on_open)
         self.act_save.triggered.connect(self._on_save)
+        self.act_split.triggered.connect(self.split_program)
+        self.act_import_pad.triggered.connect(self._on_import_pad)
         self.act_quit.triggered.connect(self.close)
         self.act_compile.triggered.connect(self._on_compile)
         self.act_run.triggered.connect(self._on_run)
         self.act_stop.triggered.connect(self._on_stop)
+        self.act_export_pad.triggered.connect(self._on_export_pad)
         self.act_digitize.triggered.connect(self._on_digitize)
         self.act_about.triggered.connect(self._on_about)
 
@@ -333,7 +483,9 @@ class MainWindow(QMainWindow):
         )
 
         self.work_fields.field_changed.connect(self._apply_work_field)
-        self.editor.cursorPositionChanged.connect(self._refresh_cursor_label)
+        for editor in self._editors():
+            editor.cursorPositionChanged.connect(self._refresh_cursor_label)
+        self.program_tabs.currentChanged.connect(lambda _i: self._refresh_cursor_label())
         self.connection_panel.connect_btn.clicked.connect(self._refresh_connection_label)
 
     # -- campos de trabajo ------------------------------------------------------
@@ -348,38 +500,150 @@ class MainWindow(QMainWindow):
 
     def _on_open(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Abrir programa", filter="Borunte DSL (*.krlb *.txt);;Todos (*)"
-        )
+            self, "Abrir programa",
+            filter="Programa (*.src *.dat);;Un solo archivo (*.krlb *.txt);;Todos (*)")
         if path:
-            with open(path, encoding="utf-8") as f:
-                self.editor.setPlainText(f.read())
-            self.messages.info(f"Abierto {path}", "archivo")
+            self.open_program(path)
+
+    def open_program(self, path: str | Path) -> bool:
+        """Un .src (o su .dat) abre los tres archivos; un .krlb, uno solo."""
+        try:
+            sources = pf.load(path)
+        except (OSError, UnicodeDecodeError) as e:
+            self.messages.error(f"No se pudo abrir {Path(path).name}: {e}", "archivo")
+            self._show_messages_dock()
+            return False
+        self.set_sources(sources)
+        self._current_path = (pf.paths_for(path)[0] if sources.split else Path(path))
+        names = ", ".join(f.name for f in sources.files())
+        self.messages.info(f"Abierto {self._current_path.parent}: {names}", "archivo")
+        return True
 
     def _on_save(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Guardar programa", filter="Borunte DSL (*.krlb);;Todos (*)"
-        )
+        start = str(self._current_path) if self._current_path else (
+            self._src_name if self._split else "programa.krlb")
+        filters = ("Programa (*.src);;Un solo archivo (*.krlb)" if self._split
+                   else "Un solo archivo (*.krlb);;Programa .src + .dat (*.src)")
+        path, chosen = QFileDialog.getSaveFileName(self, "Guardar programa", start, filters)
         if path:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(self.editor.toPlainText())
-            self.messages.info(f"Guardado {path}", "archivo")
+            self.save_program(path)
+
+    def save_program(self, path: str | Path) -> bool:
+        """`.src`: escribe el .src, su .dat y config.dat. Otra extensión: el
+        programa entero en un solo archivo (como antes)."""
+        path = Path(path)
+        try:
+            if path.suffix.lower() not in (pf.SRC_SUFFIX, pf.DAT_SUFFIX):
+                path.write_text(self.combined_source() if self._split else self.editor.toPlainText(),
+                                encoding="utf-8")
+                written = [path]
+                if self._split:      # ahora es un solo archivo: se muestra así
+                    self.set_sources(pf.load(path))
+            else:
+                path = pf.paths_for(path)[0]
+                if not self._split:  # un .krlb guardado como .src: se separa
+                    self.set_sources(pf.split_single(self.editor.toPlainText(), path.name))
+                written = self._save_split(path)
+        except OSError as e:
+            self.messages.error(f"No se pudo guardar: {e}", "archivo")
+            self._show_messages_dock()
+            return False
+        self._current_path = path
+        self.messages.info("Guardado: " + ", ".join(str(p) for p in written), "archivo")
+        return True
+
+    def _save_split(self, src_path: Path) -> list[Path]:
+        """config.dat es de toda la carpeta: se escribe si se editó acá, o si
+        en la carpeta todavía no hay uno. Si hay uno distinto y acá no se
+        tocó, manda el de la carpeta (lo puede haber cambiado otro programa)."""
+        _src, dat, config = pf.paths_for(src_path)
+        config_text = self.config_editor.toPlainText()
+        modified = self.config_editor.document().isModified()
+        write_config = modified or (not config.exists() and config_text.strip() != "")
+        self._src_name, self._dat_name = src_path.name, dat.name
+        written = pf.save(self.program_sources(), src_path, write_config=write_config)
+        if not write_config and config.exists() and config.read_text(encoding="utf-8") != config_text:
+            self.config_editor.setPlainText(config.read_text(encoding="utf-8"))
+            self.messages.warning(f"{config} ya tenía otros puntos: se usa ese config.dat.",
+                                  "archivo")
+        for editor in self._editors():
+            editor.document().setModified(False)
+        self.program_tabs.setTabText(0, self._src_name)
+        self.program_tabs.setTabText(1, self._dat_name)
+        return written
+
+    def _on_import_pad(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Importar respaldo del pad", filter="Respaldo del pad (*.zip);;Todos (*)")
+        if path:
+            self.import_pad_backup(path)
+
+    def import_pad_backup(self, path: str | Path, listing: str | Path | None = None) -> bool:
+        """Abre un respaldo del pad como programa .src + .dat. `listing`: el
+        listado HTML del pad (si hay un `<programa>.html` al lado, se usa solo):
+        anota los nombres de las herramientas y los sistemas."""
+        from pad.backup import PadBackup
+
+        path = Path(path)
+        try:
+            backup = PadBackup.read(path)
+            if listing is None:
+                sibling = path.with_name(f"{backup.name}.html")
+                listing = sibling if sibling.exists() else None
+            text = Path(listing).read_text(encoding="utf-8") if listing else None
+            imported = pad_import.import_backup(backup, path.name, text)
+        except Exception as e:  # noqa: BLE001 — zip roto, otro formato de .act, etc.
+            self.messages.error(f"No se pudo importar {path.name}: {e}", "archivo")
+            self._show_messages_dock()
+            return False
+        self.set_sources(imported.sources)
+        # El nombre del programa en el pad es el del respaldo; «Guardar» propone
+        # ese nombre, en la carpeta del zip.
+        self._current_path = path.with_name(f"{backup.name}.src")
+        self._program = None
+        self.messages.info(
+            f"Importado {path.name}: programa {backup.name}, {imported.actions} acciones, "
+            f"{imported.points} puntos (en el .dat). Guardalo para escribir los archivos "
+            f"(.src, .dat y .fnc).", "archivo")
+        for warning in imported.warnings:
+            self.messages.warning(warning, "importador")
+        if imported.warnings:
+            self._show_messages_dock()
+        self._refresh_action_states()
+        return True
+
+    def split_program(self) -> None:
+        """Un programa de un solo archivo -> .src (lógica) + .dat (puntos)."""
+        if self._split:
+            return
+        name = (self._current_path.stem if self._current_path else "programa") + pf.SRC_SUFFIX
+        self.set_sources(pf.split_single(self.editor.toPlainText(), name))
+        if self._current_path is not None:
+            self._current_path = self._current_path.with_suffix(pf.SRC_SUFFIX)
+        self.messages.info(f"Separado en {self._src_name} y {self._dat_name}. Guardalo para "
+                           f"escribir los archivos.", "archivo")
 
     def _on_about(self) -> None:
         QMessageBox.about(
             self,
             "Acerca de Borunte DSL",
-            "Compilador y entorno para programar un robot Borunte a través de un "
-            "PLC Coolmay CX3G.\n\n"
-            "El nivel PLC todavía es propuesta sin confirmar contra hardware: ver "
-            "docs/INSTRUCTION_SET.md y el docstring de comms/plc_client.py.",
+            "Compilador y entorno para programar un robot Borunte. El programa se "
+            "exporta como respaldo del pad (HCBackupRobot_*.zip) y se importa por "
+            "pendrive.\n\n"
+            "El formato del respaldo está deducido, no confirmado por Borunte: ver "
+            "docs/PAD_FORMAT.md. Probá cada programa nuevo a velocidad baja.",
         )
 
     # -- compilar ---------------------------------------------------------------
 
     def _on_compile(self) -> None:
-        source = self.editor.toPlainText()
+        sources = self.program_sources()
         try:
-            program = compile_source(source)
+            program, warnings = pf.compile_vm(sources)
+        except PadOnlyError as e:
+            self._program = None
+            self._compile_pad_only(sources, e)
+            return
         except CompileError as e:
             self._program = None
             self.messages.error(str(e), "compilador")
@@ -394,9 +658,12 @@ class MainWindow(QMainWindow):
             return
 
         self._program = program
+        self._combined = pf.combine(sources)
         self.bytecode_view.setPlainText(program.dump())
         self._populate_points_table()
-        self.project_tree.rebuild(program, source)
+        self.project_tree.rebuild(program, self._combined.text)
+        for warning in warnings:
+            self.messages.warning(warning, "compilador")
         self.messages.info(
             f"Compilado: {len(program.instructions)} instrucciones, "
             f"{len(program.points)} puntos, {len(program.proc_addresses)} procedimientos.",
@@ -406,19 +673,107 @@ class MainWindow(QMainWindow):
         self._refresh_action_states()
         self.tabs.setCurrentWidget(self.bytecode_view)
 
+    def _compile_pad_only(self, sources: pf.ProgramSources, why: CompileError) -> None:
+        """Programa con etiquetas y saltos: la VM de la PC no los ejecuta, pero
+        se puede revisar compilando para el pad (lo que se exporta)."""
+        try:
+            backup, warnings = pf.compile_pad(
+                sources, PadOptions(allow_unverified=self.act_allow_unverified.isChecked()))
+        except CompileError as e:
+            self.messages.error(str(e), "compilador")
+            self._show_messages_dock()
+            self._refresh_action_states()
+            return
+        total = len(backup.act.main) + sum(len(m.actions) for m in backup.act.modules)
+        self.bytecode_view.setPlainText(
+            "Este programa tiene etiquetas y saltos (LABEL, IF … GOTO): los ejecuta el pad, "
+            "no la VM de la PC.\nSe revisó compilando para el pad; se simula con F9 y se "
+            "exporta con Ctrl+E.")
+        self.pad_view.setPlainText("\n".join(list_backup(backup)))
+        for warning in warnings:
+            self.messages.warning(warning, "compilador")
+        self.messages.info(
+            f"Compilado para el pad: {total} acciones, {len(backup.act.modules)} módulos. "
+            f"La VM de la PC no ejecuta etiquetas ni saltos (F5 no está disponible); "
+            f"simulá con F9.", "compilador")
+        self._refresh_action_states()
+
     def _warn_about_duplicate_points(self, program: Program) -> None:
         """La tabla de puntos no se deduplica: cada MOVEJ/MOVEL agrega una
-        entrada aunque mueva a un POINT ya declarado. No es un error de
-        corrección, pero se come los 333 lugares que tiene el PLC — así que
-        conviene decirlo, en vez de que haya que contar filas para notarlo."""
+        entrada aunque mueva a un POINT ya declarado. No cambia lo que se
+        exporta al pad (ahí cada movimiento lleva su punto adentro), pero
+        conviene saberlo al mirar la pestaña Puntos."""
         total = len(program.points)
         distintos = len({tuple(p.to_scaled_ints()) for p in program.points})
         if total > distintos:
             self.messages.warning(
                 f"La tabla de puntos tiene {total} entradas para {distintos} "
-                f"posiciones distintas (no se deduplica). En el PLC caben 333.",
+                f"posiciones distintas (no se deduplica).",
                 "compilador",
             )
+
+    def _sim_report(self, severity: str, message: str) -> None:
+        if not hasattr(self, "messages"):  # todavía construyendo la ventana
+            self._pending_reports.append((severity, message))
+            return
+        # Los avisos de modelos rotos no son de una simulación: no se borran
+        # cuando arranca la siguiente.
+        source = "modelos" if message.startswith("Modelo de robot") else "simulador"
+        {"info": self.messages.info, "warning": self.messages.warning,
+         "error": self.messages.error}[severity](message, source)
+        if severity == "error":
+            self._show_messages_dock()
+
+    # -- exportar al pad ----------------------------------------------------------
+
+    def pad_program_name(self) -> str:
+        """Nombre del programa en el pad: el del archivo, sin lo que el pad no
+        acepte. Sin archivo, uno fijo."""
+        if self._current_path is None:
+            return "BorunteDSL"
+        name = re.sub(r"[^A-Za-z0-9_.\-]", "_", self._current_path.stem)
+        return name or "BorunteDSL"
+
+    def export_to_pad(self, directory: str | Path) -> Path | None:
+        """Compila para el pad y escribe el respaldo en `directory`. Devuelve la
+        ruta, o None si no compiló (el error queda en la ventana de mensajes)."""
+        options = PadOptions(program_name=self.pad_program_name(),
+                             allow_unverified=self.act_allow_unverified.isChecked())
+        try:
+            backup, warnings = pf.compile_pad(self.program_sources(), options)
+        except CompileError as e:
+            self.messages.error(f"No se puede exportar al pad: {e}", "pad")
+            self._show_messages_dock()
+            return None
+        except Exception as e:  # noqa: BLE001 — errores de parseo de Lark, etc.
+            self.messages.error(f"No se puede exportar al pad: {e}", "pad")
+            self._show_messages_dock()
+            return None
+
+        try:
+            path = backup.write(directory)
+        except OSError as e:
+            self.messages.error(f"No se pudo escribir el respaldo en {directory}: {e}", "pad")
+            self._show_messages_dock()
+            return None
+        for warning in warnings:
+            self.messages.warning(warning, "pad")
+        if options.allow_unverified:
+            self.messages.warning("Exportado CON instrucciones sin confirmar habilitadas: "
+                                  "probalo primero a velocidad baja.", "pad")
+        self.pad_view.setPlainText("\n".join(list_backup(backup)))
+        self.tabs.setCurrentWidget(self.pad_view)
+        self.messages.info(
+            f"Exportado {path}. Copialo a la raíz de un pendrive e importalo desde el "
+            f"pad. El formato no está confirmado: probalo a velocidad baja.",
+            "pad",
+        )
+        return path
+
+    def _on_export_pad(self) -> None:
+        directory = QFileDialog.getExistingDirectory(self, "Carpeta donde guardar el respaldo")
+        if directory:
+            self.export_to_pad(directory)
 
     def _populate_points_table(self) -> None:
         assert self._program is not None
@@ -493,6 +848,12 @@ class MainWindow(QMainWindow):
 
         self.status_vm.setText("VM: detenida")
         self._refresh_action_states()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 — nombre de Qt
+        # Una simulación en curso procesa eventos: sin esto seguía corriendo
+        # después de cerrar la ventana.
+        self.sim_view.cancel()
+        super().closeEvent(event)
 
     def is_running(self) -> bool:
         return self._worker is not None
@@ -576,13 +937,22 @@ class MainWindow(QMainWindow):
 
         lines = [self.point_declaration(name, pose) for name, pose in self._digitized]
         block = "\n".join(lines) + "\n"
-        cursor = self.editor.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.StartOfLine)
+        # Con el programa separado, los puntos van al .dat (al final); si es
+        # un solo archivo, donde está el cursor.
+        target = self.dat_editor if self._split else self.editor
+        cursor = target.textCursor()
+        if self._split:
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            if target.toPlainText() and not target.toPlainText().endswith("\n"):
+                block = "\n" + block
+        else:
+            cursor.movePosition(QTextCursor.MoveOperation.StartOfLine)
         cursor.insertText(block)
+        where = self._dat_name if self._split else "el editor"
         self.messages.info(
-            f"Insertadas {len(lines)} declaraciones POINT en el editor.", "digitalizar"
+            f"Insertadas {len(lines)} declaraciones POINT en {where}.", "digitalizar"
         )
-        self.tabs.setCurrentWidget(self.editor)
+        self._show_editor(target)
 
     @staticmethod
     def point_declaration(name: str, pose: Pose) -> str:
@@ -594,16 +964,25 @@ class MainWindow(QMainWindow):
     # -- navegación y estado ------------------------------------------------------
 
     def _goto_line(self, line: int) -> None:
-        block = self.editor.document().findBlockByLineNumber(line - 1)
+        """`line`: del programa compilado (los tres archivos juntos)."""
+        editor = self.editor
+        where = self._combined.locate(line) if self._combined is not None else None
+        if where is not None:
+            name, line = where
+            editor = {self._dat_name: self.dat_editor,
+                      pf.CONFIG_DAT: self.config_editor}.get(name, self.editor)
+        block = editor.document().findBlockByLineNumber(line - 1)
         if not block.isValid():
             return
-        cursor = QTextCursor(block)
-        self.editor.setTextCursor(cursor)
-        self.tabs.setCurrentWidget(self.editor)
-        self.editor.setFocus()
+        editor.setTextCursor(QTextCursor(block))
+        self._show_editor(editor)
+        editor.setFocus()
 
     def _refresh_cursor_label(self) -> None:
-        cursor = self.editor.textCursor()
+        editor = self.program_tabs.currentWidget()
+        if not isinstance(editor, QPlainTextEdit):
+            editor = self.editor
+        cursor = editor.textCursor()
         self.status_cursor.setText(
             f"Línea {cursor.blockNumber() + 1}, Col {cursor.positionInBlock() + 1}"
         )

@@ -108,6 +108,17 @@ class MessageWindow(QWidget):
         self._counts = {s: 0 for s in Severity}
         self._refresh_summary()
 
+    def clear_source(self, source: str) -> None:
+        """Borra solo los mensajes de un origen (p. ej. los de la simulación
+        anterior, para que cada corrida no se apile sobre la otra)."""
+        for row in reversed(range(self.table.rowCount())):
+            if self.table.item(row, 2).text() == source:
+                severity = next(s for s in Severity if s.label == self.table.item(row, 0).text())
+                self._counts[severity] -= 1
+                self.table.removeRow(row)
+        self._refresh_summary()
+        self._refresh_summary()
+
     def count(self, severity: Severity) -> int:
         return self._counts[severity]
 

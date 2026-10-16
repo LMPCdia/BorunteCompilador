@@ -36,14 +36,16 @@ from PySide6.QtGui import (
 KEYWORDS = [
     "POINT", "VAR", "TIMER", "PROC", "ENDPROC",
     "IF", "THEN", "ELSE", "ENDIF",
-    "WAIT_IN", "WAIT", "UNTIL", "MOVE_DONE", "SET_OUT", "SPEED",
+    "WAIT_IN", "WAIT", "UNTIL", "MOVE_DONE", "SET_OUT", "SPEED", "TOOL", "COORD",
+    "SMOOTH", "DELAY", "NEAR_END", "AWAY_START", "DISABLED", "LABEL", "GOTO", "COMMENT",
+    "CMD", "STOP", "AS",
 ]
 MOVE_KINDS = ["MOVEJ", "MOVEL"]
-POINT_FUNCTIONS = ["WORLD", "OFFSET"]
+POINT_FUNCTIONS = ["WORLD", "JOINT", "OFFSET"]
 TYPES = ["INT", "REAL", "BOOL"]
 STATES = ["ON", "OFF"]
 
-# Nombres de E/S del PLC: X10 (entrada), Y10 (salida), M100 (marca interna).
+# Nombres de E/S: X010 (entrada), Y034 (salida), M100 (marca interna).
 IO_PATTERN = r"\b[XYM][0-9]+\b"
 NUMBER_PATTERN = r"\b-?[0-9]+(\.[0-9]+)?\b"
 COMMENT_PATTERN = r";[^\n]*"

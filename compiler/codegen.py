@@ -22,8 +22,7 @@ Alcance v0.3 (limitaciones conocidas, a propósito):
     operadores que `==`.
   - PROC tiene calling convention por slots fijos, sin pila de frames: no es
     recursiva ni reentrante, y los parámetros son por valor. Ver la sección
-    "Calling convention de PROC" en docs/INSTRUCTION_SET.md — esas mismas
-    limitaciones las tiene que respetar plc_vm/.
+    "Calling convention de PROC" en docs/INSTRUCTION_SET.md.
   - Los offsets de puntos se resuelven en tiempo de compilación, no en
     runtime.
   - La tabla de puntos no se deduplica: cada MOVEJ/MOVEL registra una entrada
@@ -38,8 +37,13 @@ from compiler.ast_nodes import (
     Assignment,
     BinOp,
     CallStmt,
+    CmdStopStmt,
+    CommentStmt,
     Const,
+    DisabledStmt,
+    GotoIfStmt,
     IfStmt,
+    LabelStmt,
     MoveStmt,
     PointDecl,
     PointLiteral,
@@ -48,6 +52,8 @@ from compiler.ast_nodes import (
     ProcDecl,
     SetOutStmt,
     TimerDecl,
+    ToolStmt,
+    CoordStmt,
     VarDecl,
     VarRef,
     WaitInStmt,
@@ -74,7 +80,24 @@ from runtime.bytecode import (
 
 
 class CompileError(Exception):
-    pass
+    """Error de compilación. `line` (1-based) cuando se sabe dónde está."""
+
+    def __init__(self, message: str, line: int | None = None) -> None:
+        super().__init__(message)
+        self.line = line
+
+
+class PadOnlyError(CompileError):
+    """Algo que existe en el pad pero que la VM de la PC no ejecuta (saltos
+    con etiquetas): el programa se puede exportar y simular igual."""
+
+
+def with_line(error: CompileError, stmt) -> CompileError:
+    """El mismo error, con "Línea N:" adelante si todavía no la tiene."""
+    line = getattr(stmt, "line", None)
+    if error.line is not None or line is None:
+        return error
+    return error.__class__(f"Línea {line}: {error}", line=line)
 
 
 def _io_number(name: str) -> int:
@@ -208,6 +231,12 @@ class _Emitter:
     # -- emisión de sentencias ------------------------------------------------
 
     def emit_stmt(self, stmt) -> None:
+        try:
+            self._emit_stmt(stmt)
+        except CompileError as e:
+            raise with_line(e, stmt) from None
+
+    def _emit_stmt(self, stmt) -> None:
         if isinstance(stmt, PointDecl):
             self.register_point(self.resolve_point_expr(stmt.expr), name=stmt.name)
         elif isinstance(stmt, VarDecl):
@@ -221,6 +250,15 @@ class _Emitter:
                 self.emit(Instruction(SET_VAR, a=idx, b=int(value)))
         elif isinstance(stmt, TimerDecl):
             pass  # v0.2: TIMER es metadata; se usa inline en WAIT <n>s
+        elif isinstance(stmt, (ToolStmt, CoordStmt)):
+            pass  # solo le importa al pad: la VM de referencia no tiene marcos
+        elif isinstance(stmt, (CommentStmt, CmdStopStmt, DisabledStmt)):
+            pass  # comentarios, Cmd Set:Stop y acciones desactivadas: sin efecto en la VM
+        elif isinstance(stmt, (LabelStmt, GotoIfStmt)) or (
+                isinstance(stmt, CallStmt) and stmt.goto is not None):
+            raise PadOnlyError(
+                "Las etiquetas y los saltos (LABEL, IF … GOTO, THEN GOTO) los ejecuta el pad: la "
+                "VM de la PC no. El programa se puede exportar (Ctrl+E) y simular (F9).")
         elif isinstance(stmt, Assignment):
             self._emit_assignment(stmt)
         elif isinstance(stmt, MoveStmt):

@@ -1,88 +1,141 @@
-# Arquitectura — Lenguaje tipo KRL para Borunte vía Coolmay CX3G
+# Arquitectura — lenguaje tipo KRL para Borunte, ejecutado por el pad
 
 ## Resumen
 
-Este proyecto NO reemplaza el programa nativo del robot (el que se enseña en el
-pad). Construye una **capa externa de orquestación** que corre en el PLC,
-controlando al Borunte como un ejecutor de posiciones vía Modbus.
+El programa se escribe en la PC en un lenguaje tipo KRL (`.src` con la
+lógica + `.dat` con sus puntos + `config.dat` con los puntos comunes de la
+carpeta; o todo en un `.krlb`, como antes), se compila a un **respaldo del pad** (`HCBackupRobot_<fecha>.zip`) y se importa
+en el teach pendant del Borunte por pendrive. A partir de ahí **lo ejecuta el
+controlador del robot solo**, con sus propias E/S: no hay PLC ni PC en el
+lazo de ejecución.
 
 ```
-┌─────────────────────────────┐
-│   PC — Host                  │
-│                              │
-│  DSL (.krlb)                 │
-│    │  parser (Lark)          │
-│    ▼                         │
-│  AST                         │
-│    │  codegen                │
-│    ▼                         │
-│  Bytecode + tabla de puntos  │──── Modbus TCP (escritura D/R) ────┐
-└─────────────────────────────┘                                     │
-                                                                       ▼
-                                                         ┌─────────────────────┐
-                                                         │  Coolmay CX3G        │
-                                                         │  (VM en ladder/IL)   │
-                                                         │  - Program Counter   │
-                                                         │  - Dispatch opcode   │
-                                                         │  - IF/WHILE/timers   │
-                                                         │    nativos del PLC   │
-                                                         └─────────────────────┘
-                                                                       │
-                                                          Modbus TCP/RTU (maestro)
-                                                                       ▼
-                                                         ┌─────────────────────┐
-                                                         │  Borunte (esclavo)   │
-                                                         │  - mover a posición  │
-                                                         │  - forzar E/S        │
-                                                         │  - reportar estado   │
-                                                         └─────────────────────┘
+┌───────────────────────── PC ──────────────────────────┐
+│                                                        │
+│  DSL (.src + .dat + config.dat, o un .krlb)            │
+│    │  compiler/program_files.py: los junta y revisa    │
+│    │  parser (Lark) — compiler/grammar.lark            │
+│    ▼                                                   │
+│  AST — compiler/ast_nodes.py                           │
+│    │                                                   │
+│    ├──► compiler/pad_codegen.py ──► HCBackupRobot_*.zip ──── pendrive ───┐
+│    │      (salida de producción)                       │                 │
+│    │                                                   │                 ▼
+│    └──► compiler/codegen.py ──► bytecode               │     ┌──────────────────────┐
+│           (solo simulación)       │                    │     │ Pad + controlador     │
+│                                   ▼                    │     │ Borunte               │
+│                  runtime/vm.py ─► robot_client.py ─────┼───► │ - ejecuta el programa │
+│                  (VM de referencia)  (Modbus TCP)      │     │ - E/S propias (X/Y)   │
+│                                                        │     └──────────────────────┘
+└────────────────────────────────────────────────────────┘
 ```
 
-## Los dos niveles (no confundir)
+## Las dos salidas del compilador
 
-### Nivel Host (esto es lo que construimos)
-- Vive en el PLC (ejecución) + PC (edición/compilación).
-- Tiene: variables tipadas, IF/WHILE/FOR, timers, subrutinas, puntos como datos,
-  offsets calculados.
-- Es Turing-completo dentro de los límites del PLC (sin recursión, sin memoria
-  dinámica, sin objetos — más cerca de KRL/Structured Text que de Python real).
+Comparten gramática y AST. Difieren en lo que soportan, porque el formato del
+pad todavía está a medio decodificar:
 
-### Nivel Pad (nativo, cerrado)
-- Programa enseñado a mano en el teach pendant, vive en la EEPROM del Borunte.
-- Por Modbus se puede: iniciar/pausar/detener, limpiar alarma, leer posición
-  actual en vivo. NO se puede leer ni escribir el programa en bloque.
-- Los puntos se "digitalizan" uno por uno: se lleva el robot a la posición
-  (jog o stepping del programa) y se lee `0x091C` (mundo) o `0x08DC` (ejes).
+| | Pad (`pad_codegen.py`) | VM de referencia (`codegen.py`) |
+|---|---|---|
+| Para qué | Producción: lo ejecuta el robot | Probar la lógica en la PC |
+| `MOVEJ` / `MOVEL` | Sí. `MOVEJ` exige punto `JOINT`, `MOVEL` exige `WORLD` | Sí, sin distinguir |
+| `SET_OUT`, `WAIT n s`, `PROC`/llamadas | Sí | Sí |
+| `IF` | Solo sobre una entrada (`IF X010 == 1`), sin `ELSE` | `VAR == CONST`, `VAR == VAR`, con `ELSE` |
+| `VAR`, asignaciones, `WAIT_IN`, `PROC` con parámetros | No (error de compilación) | Sí |
+| Formato | Deducido de un respaldo real — `docs/PAD_FORMAT.md` | `docs/INSTRUCTION_SET.md` |
 
-## Decisiones de diseño ya tomadas
+Regla del generador del pad: **lo que no sabemos expresar es un error de
+compilación, nunca una adivinanza**. El robot ejecuta lo que se le carga sin
+nadie mirando.
 
-1. El bytecode vive en registros D/R del PLC, en registros consecutivos de
-   ancho fijo (ver `INSTRUCTION_SET.md`).
-2. Los puntos son una tabla separada del bytecode, referenciados por índice.
-3. Persistencia de puntos: SOLO en la PC (SQLite/JSON). La tabla "stack /
-   data source" del Borunte es volátil — confirmado — no se usa para guardar
-   nada a largo plazo, solo como buffer de ejecución si hiciera falta.
-4. Todo movimiento se ejecuta de a uno (comando → poll de `0x09A6` hasta que
-   vuelva a 0). No hay blending nativo multipunto controlado desde afuera —
-   pendiente de confirmar con Borunte si existe alguna vía adicional.
+## Qué se hace por Modbus y qué no
 
-## Pendiente de validar con hardware real / con Borunte
+`comms/robot_client.py` (Modbus TCP, mapa en `docs/MODBUS_REGISTER_MAP.md`)
+sigue sirviendo para:
 
-- [ ] Latencia real por transacción Modbus (define el tiempo de ciclo mínimo
-      por punto).
-- [ ] Si existe selección de tool/frame por Modbus (no confirmado en manuales
-      indexados).
-- [ ] Si Borunte tiene software de programación offline / formato de archivo
-      de programa (preguntar directamente — cambiaría el alcance).
-- [ ] Comportamiento exacto del disparador de "free path" / "posture line"
-      cuando se manda una posición manual (¿requiere selección previa en el
-      pad o es 100% remoto?).
+- **Digitalizar puntos**: llevar el robot a una posición y leerla.
+- **Simular contra el robot real** con la VM de referencia (un movimiento a la
+  vez, sin confirmar contra hardware).
 
-## Roadmap
+No se usa para ejecutar en producción. Por Modbus no se puede leer ni escribir
+el programa del pad en bloque; por eso la vía es el respaldo por pendrive.
 
-1. **Congelar el contrato** (`INSTRUCTION_SET.md` + `MODBUS_REGISTER_MAP.md`) — HOY
-2. **PoC de la VM**: 3-4 opcodes a mano en el CX3G, probado contra el robot real
-3. **`comms/`**: cliente Modbus robusto para robot + PLC
-4. **`compiler/`**: gramática, parser, codegen contra el bytecode congelado
-5. **`gui/`**: editor + tabla de puntos + panel de conexión + botón de deploy
-6. Iterar
+## Decisiones de diseño
+
+1. **Ejecuta el pad, no un PLC.** Se descartó la VM en ladder sobre un Coolmay
+   CX3G: el pad ya tiene movimientos, E/S, saltos y subrutinas, y el programa
+   no depende de que una PC o un PLC estén vivos.
+2. **El respaldo se reescribe sin perder nada.** `pad/backup.py` guarda las
+   acciones como `dict` crudos y conserva lo que no entiende. Leer y reescribir
+   un respaldo real da el mismo contenido byte a byte.
+3. **Lo desconocido se copia de un respaldo real.** El `.fnc` y las líneas del
+   `.act` que no entendemos salen de `pad/template.fnc` o de un respaldo del
+   mismo robot (`PadOptions.template`).
+4. **Persistencia de puntos: en la PC** (pendiente: hoy viven solo en memoria
+   de la GUI).
+
+## Pendiente de validar con el pad
+
+- [ ] Que el pad importe un respaldo reescrito sin cambios por `pad/backup.py`.
+- [ ] Que importe y ejecute uno generado por `pad_codegen.py` (a velocidad baja).
+- [ ] Numeración octal de las E/S (`point` 2 = `X012`): solo 3 casos vistos.
+- [ ] `WAIT` = acción `100` con `type: 100`, e `IF` con `pointStatus: 0` = "si
+      la entrada está en OFF".
+- [ ] Cómo se expresan en el pad: espera de entrada, salto incondicional,
+      variables.
+
+
+## Archivos del programa (`compiler/program_files.py`)
+
+Como en KUKA, un programa son dos archivos con el mismo nombre, más uno común
+a la carpeta:
+
+| Archivo | Qué tiene |
+|---|---|
+| `paletizado.src` | la lógica: movimientos, velocidades, esperas, salidas, IF, PROC. **Sin puntos** |
+| `paletizado.dat` | los puntos de ese programa: **solo** `POINT` (y comentarios) |
+| `config.dat` | puntos comunes a todos los programas de la carpeta (HOME, poses de traslado…). Opcional |
+
+- Se compilan juntos en ese orden (config.dat, .dat, .src); los errores y
+  avisos dicen archivo y línea («paletizado.src, línea 12: …»).
+- Errores: algo que no sea `POINT` en un `.dat`; un `POINT` en el `.src`
+  (también dentro de un PROC o un IF); el mismo nombre de punto en
+  config.dat y en el `.dat`.
+- Aviso: un punto del `.dat` que el `.src` no usa (los de config.dat no
+  avisan: son para varios programas).
+- El respaldo del pad **no cambia**: ahí cada movimiento lleva su punto
+  adentro (ver `docs/PAD_FORMAT.md`). La separación es solo de la PC.
+- Un `.krlb` de antes (todo junto) se abre y compila igual; *Archivo →
+  Separar en .src y .dat* lo convierte, y guardarlo como `.src` también.
+- GUI: la pestaña Programa tiene una sub-pestaña por archivo. Guardar como
+  `.src` escribe el `.src` y su `.dat`; `config.dat` se escribe solo si se
+  editó o si la carpeta todavía no tiene uno (si la carpeta tiene uno
+  distinto y no se tocó, manda el de la carpeta: lo puede haber cambiado otro
+  programa). Los puntos digitalizados (F8) se agregan al final del `.dat`.
+- `python -m sim.check paletizado.src` simula el programa con sus `.dat`.
+
+## Respaldo del pad -> programa (`compiler/pad_import.py`)
+
+El camino de vuelta: un respaldo exportado del pad se abre como programa
+`.src` + `.dat` (+ `.fnc`) y se sigue editando.
+
+```
+HCBackupRobot_*.zip ──► pad/backup.py ──► compiler/pad_import.py ──► .src + .dat + .fnc
+                                                    │
+        (opcional) listado HTML del pad ────────────┘  nombres de herramientas y sistemas
+```
+
+- El lenguaje expresa todo lo que trae un respaldo real: opciones de
+  movimiento (`SMOOTH`, `DELAY`, `TOOL`/`COORD` propios, salida por distancia),
+  etiquetas y saltos, acciones desactivadas, comentarios, `CMD STOP` y los
+  nombres del pad (`AS`). Ver `docs/LENGUAJE.md`.
+- **Ida y vuelta exacta**: importar, compilar y comparar con el original
+  (`pad_import.compare`) da el mismo programa, salvo el numerado interno
+  (`insertedIndex`) y un `customName` ausente (equivale a vacío). Probado con
+  un programa de producción de 1032 acciones: idéntico, el listado del pad
+  coincide (`pad/pad_html.py`, 1032 de 1032) y el simulador da lo mismo.
+- Lo que no se puede expresar se avisa y queda como `; NO IMPORTADO: …`; nada
+  se descarta en silencio.
+- Las etiquetas y los saltos los ejecuta el pad: la VM de la PC da
+  `PadOnlyError` (F7 compila entonces para el pad y avisa; se simula con F9).
+- El `.fnc` viaja junto al `.src` y se usa al exportar.

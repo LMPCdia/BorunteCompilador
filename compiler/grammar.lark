@@ -25,45 +25,101 @@ statement: point_decl
          | set_out_stmt
          | if_stmt
          | call_stmt
+         | tool_stmt
+         | coord_stmt
+         | label_stmt
+         | goto_if_stmt
+         | disabled_stmt
+         | comment_stmt
+         | cmd_stop_stmt
 
 // --- Declaraciones -----------------------------------------------------
 
-point_decl: "POINT" NAME "=" point_expr NEWLINE
+point_decl: "POINT" NAME "=" point_expr [as_clause] NEWLINE
+
+// Nombre que el pad muestra, cuando no es un identificador válido (el pad
+// acepta «Entrada/SalidaP1-1» o «MesaIzqReja.90M»). Sin AS se usa el nombre.
+as_clause: "AS" STRING
 
 point_expr: world_literal
+          | joint_literal
           | NAME                        -> point_ref
           | point_expr "+" offset_expr  -> point_offset
 
 world_literal: "WORLD" "(" number ("," number)~5 ")"
+// Posición por ejes (J1..J6, en grados). El MOVEJ del pad guarda ángulos de
+// eje, no X/Y/Z: ver docs/PAD_FORMAT.md.
+joint_literal: "JOINT" "(" number ("," number)~5 ")"
 offset_expr: "OFFSET" "(" signed_number ("," signed_number)~5 ")"
 
-var_decl: "VAR" NAME ":" TYPE ("=" expr)? NEWLINE
-TYPE.2: "INT" | "REAL" | "BOOL"
+// Las palabras clave van como literales en reglas con "!" y NO como
+// terminales con prioridad (TYPE.2 etc.): con prioridad, el lexer cortaba
+// identificadores que EMPIEZAN con la palabra clave (`MOVEJ_HOME()` se leía
+// como MOVEJ + _HOME). Un literal solo gana si la palabra es exactamente esa.
+var_decl: "VAR" NAME ":" var_type ("=" expr)? NEWLINE
+!var_type: "INT" | "REAL" | "BOOL"
 
 timer_decl: "TIMER" NAME "=" number "s" NEWLINE
 
-proc_decl: "PROC" NAME "(" [NAME ("," NAME)*] ")" NEWLINE proc_body "ENDPROC" NEWLINE
+proc_decl: "PROC" NAME "(" [NAME ("," NAME)*] ")" [as_clause] NEWLINE proc_body "ENDPROC" NEWLINE
 proc_body: (statement | blank_line)*
 
 // --- Sentencias ----------------------------------------------------------
 
 assignment: NAME "=" expr NEWLINE
 
-move_stmt: MOVE_KIND point_expr "SPEED" number NEWLINE
-MOVE_KIND.2: "MOVEJ" | "MOVEL"
+// Opciones de un movimiento, todas vistas en un respaldo real del pad:
+// suavizado, demora propia, herramienta y sistema de ESE movimiento (si no se
+// pone, los vigentes), y una salida que cambia según la distancia al punto
+// (pad/bindio.py): NEAR_END = al llegar a `mm` del punto final, AWAY_START =
+// al alejarse más de `mm` del punto inicial; DISABLED = armada pero apagada.
+move_stmt: move_kind point_expr "SPEED" number move_opt* NEWLINE
+?move_opt: smooth_opt | delay_opt | tool_opt | coord_opt | near_end_opt | away_start_opt
+smooth_opt: "SMOOTH" number
+delay_opt: "DELAY" number
+tool_opt: "TOOL" number
+coord_opt: "COORD" number
+near_end_opt: "NEAR_END" NAME state number [bind_disabled]
+away_start_opt: "AWAY_START" NAME state number [bind_disabled]
+!bind_disabled: "DISABLED"
+!move_kind: "MOVEJ" | "MOVEL"
 
 wait_in_stmt: "WAIT_IN" "(" NAME ("," number)? ")" NEWLINE
 wait_time_stmt: "WAIT" number "s" NEWLINE
               | "WAIT" "UNTIL" "MOVE_DONE" NEWLINE
 
-set_out_stmt: "SET_OUT" "(" NAME "," STATE ")" NEWLINE
-STATE.2: "ON" | "OFF"
+set_out_stmt: "SET_OUT" "(" NAME "," state ")" NEWLINE
+
+// Etiquetas y saltos del pad. `LABEL nombre [número]`: el número es el que
+// guarda el pad (único en cada PROC o en el principal); sin número se asigna
+// uno libre. `IF Xnnn == 1 GOTO etiqueta` salta si la entrada está ON (la
+// forma vista en el pad). `PROC()` seguido de `THEN GOTO etiqueta`: llamar y
+// después ir a la etiqueta.
+label_stmt: "LABEL" NAME [number] [as_clause] NEWLINE
+goto_if_stmt: "IF" expr "GOTO" NAME NEWLINE
+
+// Una acción que en el pad está desactivada (comentada pero con su contenido).
+// Solo SET_OUT e IF…GOTO: es lo único que se vio desactivado.
+disabled_stmt: "DISABLED" (set_out_stmt | goto_if_stmt)
+
+// Un comentario del pad (acción), no un comentario del archivo (`;`).
+comment_stmt: "COMMENT" STRING NEWLINE
+
+// `Cmd Set:Stop` del pad (acción 53000), visto una vez al principio del principal.
+cmd_stop_stmt: "CMD" "STOP" NEWLINE
+
+// Herramienta y sistema de coordenadas de los movimientos que siguen (los
+// números son los del pad). Ver compiler/pad_codegen.py.
+tool_stmt: "TOOL" number NEWLINE
+coord_stmt: "COORD" number NEWLINE
+!state: "ON" | "OFF"
 
 if_stmt: "IF" expr "THEN" NEWLINE then_block ("ELSE" NEWLINE else_block)? "ENDIF" NEWLINE
 then_block: (statement | blank_line)*
 else_block: (statement | blank_line)*
 
-call_stmt: NAME "(" [expr ("," expr)*] ")" NEWLINE
+call_stmt: NAME "(" [expr ("," expr)*] ")" [goto_clause] NEWLINE
+goto_clause: "THEN" "GOTO" NAME
 
 // --- Expresiones -----------------------------------------------------------
 
@@ -82,6 +138,7 @@ signed_number: SIGNED_NUMBER
 
 %import common.CNAME -> NAME
 %import common.SIGNED_NUMBER
+%import common.ESCAPED_STRING -> STRING
 %import common.NEWLINE
 %import common.WS_INLINE
 %ignore WS_INLINE

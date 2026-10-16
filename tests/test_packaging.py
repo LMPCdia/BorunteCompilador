@@ -147,9 +147,9 @@ def test_pyinstaller_is_in_the_build_requirements():
     assert "pyinstaller" in build_reqs
 
 
-def test_runtime_requirements_still_list_the_four_real_dependencies():
+def test_runtime_requirements_still_list_the_real_dependencies():
     requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8").lower()
-    for package in ("lark", "pymodbus", "pyside6", "pytest"):
+    for package in ("lark", "pymodbus", "pyside6", "pytest", "gmsh", "python-fcl"):
         assert package in requirements, f"falta {package} en requirements.txt"
 
 
@@ -181,3 +181,10 @@ def test_self_test_passes_in_development():
     from gui.app import _self_test
 
     assert _self_test() == 0
+
+
+def test_the_spec_bundles_the_fcl_dlls(spec_text):
+    """python-fcl trae ccd.dll y octomap.dll al lado de la extensión: sin
+    ellas el .exe abre, pero no busca choques (el self-test lo detecta)."""
+    assert 'collect_dynamic_libs("fcl")' in spec_text
+    assert "FCL_BINARIES" in spec_text.split("binaries=")[1].split("\n")[0]

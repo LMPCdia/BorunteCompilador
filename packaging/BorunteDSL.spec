@@ -25,10 +25,24 @@ from datafiles import collect_data_files, entry_script, project_root  # noqa: E4
 
 ROOT = project_root()
 
+# gmsh (lector de STEP) carga su librería nativa con ctypes desde la carpeta de
+# su propio módulo: PyInstaller no la ve por imports. En el .exe, el módulo
+# queda en la raíz de la carpeta temporal, así que la librería va ahí.
+import gmsh  # noqa: E402
+
+GMSH_BINARIES = [(gmsh.libpath, ".")]
+
+# python-fcl (choques del simulador) trae sus DLL (ccd, octomap) al lado de la
+# extensión compilada, en la carpeta del paquete. Se llevan a la misma carpeta
+# del .exe: Windows las busca junto a la extensión que las usa.
+from PyInstaller.utils.hooks import collect_dynamic_libs  # noqa: E402
+
+FCL_BINARIES = collect_dynamic_libs("fcl")
+
 a = Analysis(
     [str(entry_script(ROOT))],
     pathex=[str(ROOT)],
-    binaries=[],
+    binaries=GMSH_BINARIES + FCL_BINARIES,
     datas=collect_data_files(ROOT),
     hiddenimports=[],
     hookspath=[],
