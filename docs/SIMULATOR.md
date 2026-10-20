@@ -81,6 +81,22 @@ Los STEP se convierten a triángulos con **gmsh** (dependencia nueva, trae
 OpenCascade; suma ~60 MB al `.exe`). La malla es gruesa a propósito: alcanza
 para ver la celda, no para medir.
 
+**Tope de triángulos** (`STEP_MAX_TRIANGLES`, 400 mil). Un STEP guarda
+geometría exacta; la cantidad de triángulos la decide gmsh de nuestro lado, y
+no se sabe sin mallar. Medido con la mesa San Lorenzo (1,5 m, 2184 caras):
+
+| detalle mínimo | triángulos | tiempo |
+|---|---|---|
+| diagonal/2000 (~1 mm, el default viejo) | 8.210.904 | 384 s (cerró el programa) |
+| diagonal/200 (~10 mm) | 205.748 | 18 s |
+
+`load_step` malla primero a diagonal/200 y afina de a x2 solo si la predicción
+entra en el tope; si el primer mallado ya se pasa, engrosa. Una pieza chica
+llega igual al detalle pedido. La pestaña avisa cuando una pieza quedó más
+gruesa que lo pedido. Lo que el tope **no** acota es el primer mallado: un STEP
+mucho más pesado que esa mesa puede tardar igual. El buffer de la GPU
+(`Mesh.interleaved`) se arma con numpy si está (viene con python-fcl).
+
 ## Biblioteca de Google Drive (`sim/library.py`, `gui/library_view.py`)
 
 Pestaña **Biblioteca**: lee EN LÍNEA la carpeta de Drive (por defecto

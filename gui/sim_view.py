@@ -1469,6 +1469,12 @@ class SimView(QWidget):
                 raise MeshError(f"No se pudo leer {Path(path).name}: {e}") from e
             finally:
                 QGuiApplication.restoreOverrideCursor()
+            mesh = self._mesh_cache[path]
+            if mesh.coarsened:
+                count = f"{len(mesh):,}".replace(",", ".")
+                self._report("info", f"{Path(path).name}: mallada con detalle mínimo de "
+                             f"{mesh.detail_mm:.0f} mm ({count} triángulos) para no "
+                             "trabar el visor.")
         return self._mesh_cache[path]
 
     def import_object(self, path: str | Path) -> LayoutObject | None:

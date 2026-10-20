@@ -16,12 +16,30 @@ import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 
+try:  # Opcional, como en sim/collision.py: sin numpy las mallas grandes tardan más.
+    import numpy as np
+except ImportError:  # pragma: no cover — depende de la instalación
+    np = None
+
 Vec = tuple[float, float, float]
 
 # Una pieza de CAD convertida sin límite puede tener millones de triángulos;
 # el visor no los necesita para ver un layout.
 STEP_ELEMENTS_PER_CIRCLE = 16
 MAX_SKIPPED_FACES = 50  # caras que gmsh no puede mallar y se dejan afuera
+
+# Tope de triángulos de un STEP. Medido con una mesa de 1,5 m (MesaSanLorenzo,
+# 2184 caras): con detalle mínimo = diagonal/2000 (~1 mm) dio 8,2 M de
+# triángulos en 384 s y cerró el programa; con /200 (~10 mm), 205 mil en ~36 s.
+# Se malla primero a /200 y se afina de a pasos x2 mientras la predicción
+# entre en el tope; si ya se pasa, se engrosa.
+STEP_MAX_TRIANGLES = 400_000
+STEP_START_RATIO = 200.0
+STEP_COARSEST_RATIO = 30.0  # más grueso no baja: manda MeshSizeMax y la curvatura
+# Cuánto crecen los triángulos al afinar: en esa mesa, triángulos ~ relación^e
+# con e entre 0,5 (muy grueso) y 1,7 (fino). Se predice con 2, que sobreestima: es
+# preferible quedarse un paso más grueso que pasarse y tener que rehacer.
+_REFINE_EXPONENT = 2.0
 
 
 class MeshError(Exception):
@@ -45,6 +63,10 @@ def _normalize(v: Vec) -> Vec:
 class Mesh:
     triangles: list[tuple[Vec, Vec, Vec]] = field(default_factory=list)
     skipped_faces: int = 0  # caras del STEP que gmsh no pudo mallar (ver load_step)
+    # Detalle mínimo con que se malló un STEP (mm), y si se engrosó más de lo
+    # pedido para no pasar de STEP_MAX_TRIANGLES. None si no viene de un STEP.
+    detail_mm: float | None = None
+    coarsened: bool = False
 
     def add(self, a: Vec, b: Vec, c: Vec) -> None:
         self.triangles.append((a, b, c))
@@ -67,12 +89,32 @@ class Mesh:
 
     def interleaved(self) -> bytes:
         """Posición + normal por vértice, float32: lo que consume la GPU."""
+        if np is not None and self.triangles:
+            return _interleaved_numpy(self.triangles)
         out = bytearray()
         for a, b, c in self.triangles:
             n = _normalize(_cross(_sub(b, a), _sub(c, a)))
             for p in (a, b, c):
                 out += struct.pack("<6f", *p, *n)
         return bytes(out)
+
+
+def _interleaved_numpy(triangles: list[tuple[Vec, Vec, Vec]]) -> bytes:
+    """Lo mismo que el bucle de `Mesh.interleaved`, byte a byte: la normal se
+    calcula en float64 y recién después se pasa a float32, y una normal nula
+    queda en (0, 0, 1) como en `_normalize`."""
+    tri = np.asarray(triangles, dtype=np.float64).reshape(-1, 3, 3)
+    a, b, c = tri[:, 0], tri[:, 1], tri[:, 2]
+    n = np.cross(b - a, c - a)
+    length = np.sqrt((n * n).sum(axis=1))
+    flat = length < 1e-12
+    n[flat] = (0.0, 0.0, 1.0)
+    length[flat] = 1.0
+    n /= length[:, None]
+    out = np.empty((len(tri), 3, 6), dtype=np.float32)
+    out[:, :, :3] = tri
+    out[:, :, 3:] = n[:, None, :]
+    return out.tobytes()
 
 
 # --- carga de archivos ------------------------------------------------------------
@@ -137,10 +179,13 @@ def load_obj(path: Path) -> Mesh:
 
 
 def load_step(path: Path, elements_per_circle: int = STEP_ELEMENTS_PER_CIRCLE,
-              min_size_ratio: float = 2000.0) -> Mesh:
+              min_size_ratio: float = 2000.0,
+              max_triangles: int = STEP_MAX_TRIANGLES) -> Mesh:
     """STEP -> triángulos con gmsh. Unidades del archivo convertidas a mm.
     `elements_per_circle` y `min_size_ratio` (detalle más chico = diagonal /
-    esto) bajan la cantidad de triángulos de piezas con mucho detalle."""
+    esto) bajan la cantidad de triángulos de piezas con mucho detalle.
+    `min_size_ratio` es el detalle más fino que se quiere: se llega hasta ahí
+    solo si entra en `max_triangles` (ver `_mesh_within_budget`)."""
     try:
         import gmsh
     except Exception as e:  # noqa: BLE001 — falta la librería o su DLL
@@ -160,8 +205,7 @@ def load_step(path: Path, elements_per_circle: int = STEP_ELEMENTS_PER_CIRCLE,
         # Malla de superficie gruesa, que sigue la curvatura: suficiente para ver.
         gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", elements_per_circle)
         gmsh.option.setNumber("Mesh.MeshSizeMax", diag / 15)
-        gmsh.option.setNumber("Mesh.MeshSizeMin", diag / min_size_ratio)
-        skipped = _generate_skipping_bad_faces(gmsh)
+        ratio, skipped = _mesh_within_budget(gmsh, diag, min_size_ratio, max_triangles)
 
         tags, coords, _ = gmsh.model.mesh.getNodes()
         index = {int(t): i for i, t in enumerate(tags)}
@@ -177,9 +221,53 @@ def load_step(path: Path, elements_per_circle: int = STEP_ELEMENTS_PER_CIRCLE,
                     pts.append((coords[i], coords[i + 1], coords[i + 2]))
                 mesh.add(*pts)
         mesh.skipped_faces = skipped
+        mesh.detail_mm = diag / ratio
+        mesh.coarsened = ratio < min_size_ratio
         return mesh
     finally:
         gmsh.finalize()
+
+
+def _mesh_within_budget(gmsh, diag: float, finest_ratio: float,
+                        max_triangles: int) -> tuple[float, int]:
+    """Malla con el detalle más fino que entre en `max_triangles`, sin pasar de
+    `finest_ratio`. No se puede saber cuántos triángulos da un detalle sin
+    mallarlo, y mallar demasiado fino es justo lo que tarda minutos: por eso se
+    arranca en STEP_START_RATIO y se afina de a x2 solo si la predicción
+    (exponente _REFINE_EXPONENT, que sobreestima) entra. Si el primer mallado
+    ya se pasa, se engrosa. Devuelve la relación usada y las caras salteadas.
+    Un STEP mucho más pesado que la mesa medida puede tardar igual en el
+    primer mallado: el tope evita que el resultado cierre el programa, no
+    acota ese primer tiempo."""
+    skipped = 0
+
+    def mesh_at(ratio: float) -> int:
+        nonlocal skipped
+        gmsh.model.mesh.clear()
+        gmsh.option.setNumber("Mesh.MeshSizeMin", diag / ratio)
+        skipped += _generate_skipping_bad_faces(gmsh)
+        types, _, node_lists = gmsh.model.mesh.getElements(2)
+        return sum(len(nodes) // 3 for etype, nodes in zip(types, node_lists) if etype == 2)
+
+    ratio = min(STEP_START_RATIO, finest_ratio)
+    count = mesh_at(ratio)
+    if count > max_triangles:
+        # Achicar la relación en la misma proporción que sobran triángulos
+        # engrosa de más (el exponente real es < 2), así que suele bastar una vez.
+        while count > max_triangles and ratio > STEP_COARSEST_RATIO:
+            ratio = max(STEP_COARSEST_RATIO, ratio * max_triangles / count * 0.8)
+            count = mesh_at(ratio)
+        return ratio, skipped
+    while ratio < finest_ratio:
+        finer = min(finest_ratio, ratio * 2)
+        if count * (finer / ratio) ** _REFINE_EXPONENT > max_triangles:
+            break
+        finer_count = mesh_at(finer)
+        if finer_count > max_triangles:  # la predicción se quedó corta: volver
+            mesh_at(ratio)
+            break
+        ratio, count = finer, finer_count
+    return ratio, skipped
 
 
 def _generate_skipping_bad_faces(gmsh) -> int:
