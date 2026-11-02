@@ -31,9 +31,9 @@ Write-Host "Python: $python"
 if (-not $SkipTests) {
     Write-Host "`n=== Bateria de tests ===" -ForegroundColor Cyan
     $env:QT_QPA_PLATFORM = "offscreen"
-    & $python -m pytest tests/ -q
+    & $python -X faulthandler -m pytest tests/ -q
     if ($LASTEXITCODE -ne 0) {
-        throw "Los tests fallaron: no se construye el ejecutable."
+        throw "Los tests fallaron (pytest salio con $LASTEXITCODE): no se construye el ejecutable."
     }
 }
 

@@ -285,15 +285,21 @@ def test_spindle_output_wraps_the_program(model):
 # --- pestaña Fresado (sin vista 3D, como todos los tests de GUI) ------------------------------
 
 
-@pytest.fixture()
-def panel(tmp_path, model):
+@pytest.fixture(scope="module")
+def app():
     from PySide6.QtWidgets import QApplication
+
+    return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture()
+def panel(app, tmp_path, model):
+    from PySide6.QtCore import QEvent
 
     from gui.cam_panel import CamPanel
     from sim.meshes import write_stl
     from sim.scene import Layout, LayoutObject
 
-    QApplication.instance() or QApplication([])
     stl = tmp_path / "pieza.stl"
     write_stl(dome(n=30), stl)
     cell = Layout(tools={1: [0, 0, 100, 0, 0, 0]})
@@ -310,7 +316,12 @@ def panel(tmp_path, model):
     p.resize(400, 400)
     p.cell, p.programs, p.previews, p.reports = cell, programs, previews, reports
     p.refresh()
-    return p
+    yield p
+    # Que no quede para el cierre del proceso: un widget destruido después de la
+    # QApplication hace caer a Python en Windows, con todos los tests ya pasados.
+    p.shutdown()
+    p.deleteLater()
+    app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
 def click(canvas, button, u, v):
