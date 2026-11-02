@@ -55,7 +55,7 @@ def check_collisions(result: SimResult, model: RobotModel, layout: Layout) -> li
             notes.append(f"Choques: «{obj.name}» no se revisa ({e})")
             continue
         obstacles.append(
-            collision.Obstacle(obj.name, mesh, object_matrix(obj), obj.workpiece))
+            collision.Obstacle(obj.name, mesh, object_matrix(obj), obj.workpiece, obj.machined))
     tool = None
     if layout.tool_mesh:
         try:

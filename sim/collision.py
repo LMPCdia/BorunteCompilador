@@ -131,6 +131,7 @@ class Obstacle:
     mesh: Mesh           # en coordenadas del CAD
     matrix: Matrix       # dónde está en el mundo
     workpiece: bool = False  # la herramienta trabaja sobre ella: solo cuenta tocarla
+    machined: bool = False   # se fresa: la herramienta entra a propósito, no se revisa con ella
 
 
 def _bvh(vertices, faces):
@@ -180,6 +181,7 @@ class _Solid:
         self.index = index
         self.name = obstacle.name
         self.workpiece = obstacle.workpiece
+        self.machined = obstacle.machined
         vertices, faces = _arrays(obstacle.mesh)
         self.object = fcl.CollisionObject(_bvh(vertices, faces), _transform(obstacle.matrix))
         world = vertices @ np.array([r[:3] for r in obstacle.matrix[:3]]).T + np.array(
@@ -264,6 +266,8 @@ class CollisionChecker:
             if part.frame is None:
                 continue
             for solid in self.solids:
+                if part.name == TOOL_PART and solid.machined:
+                    continue
                 margin = 0.0 if (part.name == TOOL_PART and solid.workpiece) else self.margin
                 self.pairs.append((part, solid, margin))
             if floor and part.level >= 2:

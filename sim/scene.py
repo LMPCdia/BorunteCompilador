@@ -110,6 +110,9 @@ class LayoutObject:
     # La herramienta trabaja sobre esta pieza (p. ej. la que se suelda): para la
     # herramienta solo cuenta tocarla, no acercarse. El brazo usa el margen igual.
     workpiece: bool = False
+    # Se fresa (sim/cam.py): la herramienta entra en ella a propósito, así que
+    # no se buscan choques herramienta-pieza. El brazo se revisa igual.
+    machined: bool = False
     drive_id: str = ""        # vino de la biblioteca de Drive: en otra PC se vuelve a bajar
 
 

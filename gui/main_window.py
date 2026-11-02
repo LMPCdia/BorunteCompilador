@@ -183,7 +183,8 @@ class MainWindow(QMainWindow):
         self.sim_view = SimView(self.combined_source, report=self._sim_report,
                                 clear_reports=lambda: self.messages.clear_source("simulador"),
                                 compile_pad=lambda options: pf.compile_pad(
-                                    self.program_sources(), options))
+                                    self.program_sources(), options),
+                                load_program=self.load_generated_program)
         self.sim_tab = _scrollable(self.sim_view)
         self.tabs.addTab(self.sim_tab, "Simulación 3D")
         for editor in self._editors():
@@ -211,6 +212,23 @@ class MainWindow(QMainWindow):
         return pf.ProgramSources(src, pf.SourceFile(self._dat_name, self.dat_editor.toPlainText()),
                                  pf.SourceFile(pf.CONFIG_DAT, self.config_editor.toPlainText()),
                                  fnc=self._fnc)
+
+    def load_generated_program(self, sources: pf.ProgramSources) -> bool:
+        """Un programa que no sale de un archivo (Fresado): queda como sin
+        guardar, y guardarlo no pisa el que estaba abierto."""
+        if any(e.document().isModified() for e in self._editors()):
+            answer = QMessageBox.question(
+                self, "Programa generado",
+                "El programa del editor tiene cambios sin guardar. ¿Reemplazarlo igual?")
+            if answer != QMessageBox.StandardButton.Yes:
+                return False
+        self.set_sources(sources)
+        self._current_path = None
+        for editor in self._editors():
+            editor.document().setModified(True)
+        self.messages.info(f"Programa generado: {sources.src.name}. Guardalo para conservarlo.",
+                           "simulador")
+        return True
 
     def combined_source(self) -> str:
         """El programa entero en un texto (lo que compila el simulador)."""

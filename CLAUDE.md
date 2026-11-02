@@ -10,7 +10,8 @@ Lenguaje tipo KRL para programar un robot Borunte. El programa se compila a un
 pendant por pendrive, y lo ejecuta el controlador del robot solo. LEER
 PRIMERO: `docs/ARCHITECTURE.md`, después `docs/LENGUAJE.md` (la guía del
 lenguaje, sus ejemplos los compila un test), `docs/PAD_FORMAT.md`,
-`docs/INSTRUCTION_SET.md`, `docs/MODBUS_REGISTER_MAP.md`, `docs/SIMULATION.md`.
+`docs/INSTRUCTION_SET.md`, `docs/MODBUS_REGISTER_MAP.md`, `docs/SIMULATION.md`,
+`docs/FRESADO.md`.
 
 **Ya no hay PLC.** Hasta octubre 2026 el plan era una VM en ladder sobre un
 Coolmay CX3G; se descartó y se borró ese código (`comms/plc_client.py`,
@@ -89,6 +90,9 @@ respaldo real; la lógica se prueba contra `comms/robot_simulator.py`.
   validado con el plano del 0805A). **Pendiente**: el 1510A de la app tiene
   J2 36 mm más abajo que lo que da ese método (ver `docs/SIMULATOR.md`).
   Ver `docs/SIMULATOR.md`.
+- **`sim/cam.py`** + `gui/cam_panel.py`: fresado. Pieza CAD + área 2D -> mapa de
+  alturas -> pasadas apoyando la fresa -> programa `.src`/`.dat` normal. Sin
+  cambios en el formato del pad. Ver `docs/FRESADO.md`.
 - **GUI** (`gui/`): "Exportar para el pad" (Ctrl+E) + pestaña "Pad" con el
   listado; compilar/ejecutar en la VM; digitalizar puntos.
 - **`packaging/`** + `.github/workflows/build-exe.yml`: `.exe` de un solo

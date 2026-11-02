@@ -31,6 +31,8 @@ Leer primero `docs/ARCHITECTURE.md` y `docs/PAD_FORMAT.md`.
 - [x] Programa en `.src` (lógica) + `.dat` (puntos) + `config.dat` (puntos
       comunes de la carpeta), como en KUKA; los `.krlb` de antes siguen
       andando. Ver `docs/ARCHITECTURE.md`
+- [x] **Fresado** (`sim/cam.py`, pestaña "Fresado"): pieza CAD + área 2D -> trayectoria sobre la
+      superficie -> programa `.src`/`.dat`. No probado en el robot. Ver `docs/FRESADO.md`
 - [x] **Simulador 3D** (`sim/`, pestaña "Simulación 3D"): ejecuta el respaldo
       del pad sobre el modelo del robot, avisa ejes fuera de rango, puntos
       inalcanzables y singularidades, estima el tiempo de ciclo, y arma el

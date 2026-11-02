@@ -53,6 +53,8 @@ from PySide6.QtWidgets import (
 
 from compiler.codegen import CompileError
 from compiler.pad_codegen import MAX_TOOL_OR_COORD, PadOptions, compile_to_pad_report, io_point
+from compiler.program_files import ProgramSources
+from gui.cam_panel import CamPanel
 from pad.backup import PadBackup
 from pad.listing import io_name
 from sim import collision
@@ -248,8 +250,11 @@ class SimView(QWidget):
     def __init__(self, get_source: Callable[[], str], report: Reporter | None = None,
                  enable_3d: bool | None = None,
                  clear_reports: Callable[[], None] | None = None,
-                 compile_pad: Callable[[PadOptions], tuple] | None = None) -> None:
+                 compile_pad: Callable[[PadOptions], tuple] | None = None,
+                 load_program: Callable[[ProgramSources], bool] | None = None) -> None:
         super().__init__()
+        # Programa generado (Fresado) -> editor. Devuelve si se cargó.
+        self._load_program = load_program or (lambda _sources: False)
         self._get_source = get_source
         # Programa del editor -> (respaldo, avisos). La ventana principal pasa
         # uno que junta .src, .dat y config.dat y dice archivo y línea.
@@ -529,6 +534,9 @@ class SimView(QWidget):
         tabs.addTab(self.cell_tab, "Celda")
         self.library_tab_index = tabs.addTab(self.library, "Biblioteca")
         tabs.addTab(_vscroll(self._build_collisions()), "Choques")
+        self.cam_panel = CamPanel(lambda: self.layout_data, lambda: self.model, self._mesh_for,
+                                  self._on_cam_program, self._on_cam_preview, self._report)
+        tabs.addTab(_vscroll(self.cam_panel), "Fresado")
         tabs.addTab(self.tools_table, "Herramientas")
         tabs.addTab(self.frames_table, "Coordenadas")
         tabs.currentChanged.connect(
@@ -1107,7 +1115,8 @@ class SimView(QWidget):
             except MeshError as e:
                 self._report("warning", f"Choques: «{obj.name}» no se revisa ({e})")
                 continue
-            obstacles.append(collision.Obstacle(obj.name, mesh, object_matrix(obj), obj.workpiece))
+            obstacles.append(collision.Obstacle(obj.name, mesh, object_matrix(obj), obj.workpiece,
+                                                obj.machined))
         try:
             checker = collision.CollisionChecker(
                 self.model, robot_link_meshes(self.model, tool_axis=False), obstacles,
@@ -1138,6 +1147,18 @@ class SimView(QWidget):
         if self.charts is not None:
             self.charts.close()
         self.library.shutdown()
+        self.cam_panel.shutdown()
+
+    def _on_cam_program(self, sources: ProgramSources) -> bool:
+        if not self._load_program(sources):
+            return False
+        self.backup = self.backup_path = None      # simular el programa nuevo, no un respaldo
+        self._mark_stale("se generó el programa de fresado")
+        return True
+
+    def _on_cam_preview(self, points: list, colors: list) -> None:
+        if self.viewport is not None:
+            self.viewport.set_path(points, colors)
 
     def source_changed(self) -> None:
         """El programa del editor (quizás) cambió. Se compara el texto: el
